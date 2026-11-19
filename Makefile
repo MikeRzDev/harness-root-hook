@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
-.PHONY: build test dist release install-claude-code install-codex uninstall-claude-code uninstall-codex clean
+.PHONY: build test dist release formula tap install-claude-code install-codex uninstall-claude-code uninstall-codex clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/psudo ./cmd/psudo
@@ -25,10 +25,27 @@ dist: test
 	done
 	cd dist && shasum -a 256 *.tar.gz > SHA256SUMS
 
-# Publishes a GitHub release from local artifacts. Run only on purpose:
-#   git tag v1.0.0 && make release VERSION=v1.0.0
-release: dist
-	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --title "psudo $(VERSION)" --generate-notes
+TAP_REPO := MikeRzDev/homebrew-tap
+
+# Publishes a GitHub release from local artifacts, then the Homebrew formula.
+# Run only on purpose, from a clean tree:
+#   git tag v1.0.0 && git push origin v1.0.0 && make release VERSION=v1.0.0
+release: dist formula
+	@git diff --quiet HEAD || { echo "release: working tree is dirty"; exit 1; }
+	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || { echo "release: tag $(VERSION) not found"; exit 1; }
+	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --verify-tag --title "psudo $(VERSION)" --generate-notes
+	$(MAKE) tap VERSION=$(VERSION)
+
+formula:
+	scripts/brew-formula.sh $(VERSION) dist/SHA256SUMS > dist/psudo.rb
+
+# Pushes dist/psudo.rb to the tap so `brew install MikeRzDev/tap/psudo` gets it.
+tap:
+	rm -rf dist/tap
+	gh repo clone $(TAP_REPO) dist/tap
+	mkdir -p dist/tap/Formula
+	cp dist/psudo.rb dist/tap/Formula/psudo.rb
+	cd dist/tap && git add Formula/psudo.rb && git commit -m "psudo $(VERSION)" && git push
 
 install-claude-code: build
 	bin/psudo --install=claude-code

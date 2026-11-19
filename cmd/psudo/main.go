@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -23,7 +24,18 @@ import (
 	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
 )
 
+// version is set by -ldflags in release builds. `go install module@vX` builds
+// fall back to the module version recorded in the binary.
 var version = "dev"
+
+func init() {
+	if version != "dev" {
+		return
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = info.Main.Version
+	}
+}
 
 const usage = `usage: psudo [-H <host>] [--] <command> [args...]
 

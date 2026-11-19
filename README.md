@@ -114,6 +114,27 @@ failures accurately.
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
+```sh
+brew install MikeRzDev/tap/psudo
+psudo --install=claude-code     # and/or
+psudo --install=codex
+```
+
+The installer copies psudo into the harness's hook folder, so after
+`brew upgrade psudo` run `psudo --install=…` again to update that copy.
+
+### Go
+
+```sh
+go install github.com/MikeRzDev/harness-psudo-hook/cmd/psudo@latest
+"$(go env GOPATH)"/bin/psudo --install=claude-code     # and/or --install=codex
+```
+
+Pin a version with `@v0.1.0` instead of `@latest`. Go builds it from source
+(Go 1.22+), so `go install` works on any platform Go targets.
+
 ### From a release
 
 Download the archive for your platform from
@@ -139,9 +160,6 @@ git clone https://github.com/MikeRzDev/harness-psudo-hook.git
 cd harness-psudo-hook
 make install-claude-code     # and/or: make install-codex
 ```
-
-`go install github.com/MikeRzDev/harness-psudo-hook/cmd/psudo@latest` also works;
-then run `psudo --install=…` from `$(go env GOPATH)/bin`.
 
 ### Requirements
 
@@ -238,7 +256,7 @@ guard can be worked around, and Codex has no deny hook. See
 make test       # go vet + unit tests (fake sudo, ssh and dialogs; no real password or root)
 make build      # bin/psudo
 make dist       # cross-compiled archives + SHA256SUMS in dist/
-make release VERSION=v1.2.3   # gh release create from dist/; run deliberately, no CI
+make release VERSION=v1.2.3   # GitHub release from dist/ + Homebrew tap update; run deliberately, no CI
 ```
 
 The local and remote transports run through the same test suite. It checks that
