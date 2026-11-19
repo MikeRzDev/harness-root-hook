@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/cache"
-	"github.com/MikeRzDev/harness-root-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-root-hook/internal/runner"
-	"github.com/MikeRzDev/harness-root-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
 )
 
 const secret = `test-only 'pass' \ $(x) "with" spaces`

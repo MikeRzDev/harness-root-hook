@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-root-hook/internal/runner"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
 )
 
 // Only error paths are exercised here; a valid command would open a real dialog.

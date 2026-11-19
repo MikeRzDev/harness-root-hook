@@ -17,7 +17,7 @@ const secret = `test-only 'password' \ $() with spaces`
 
 func TestDefaultsAndExample(t *testing.T) {
 	ttl, err := LoadConfig(filepath.Join(t.TempDir(), "missing.json"))
-	if err != nil || ttl != 7200 {
+	if err != nil || ttl != 0 {
 		t.Fatalf("ttl %d err %v", ttl, err)
 	}
 	example, err := os.ReadFile("../../config.example.json")
@@ -27,8 +27,9 @@ func TestDefaultsAndExample(t *testing.T) {
 }
 
 func TestConfigOverridesAndDisable(t *testing.T) {
-	for raw, want := range map[string]int{`{"cache":{"ttl_seconds":60}}`: 60, `{"cache":{"enabled":false}}`: 0,
-		`{"cache":{"ttl_seconds":0}}`: 0, `{"cache":{}}`: 7200, `{}`: 7200} {
+	for raw, want := range map[string]int{`{"cache":{"enabled":true,"ttl_seconds":60}}`: 60, `{"cache":{"enabled":false}}`: 0,
+		`{"cache":{"enabled":true}}`: 7200, `{"cache":{"ttl_seconds":60}}`: 0, `{"cache":{"enabled":true,"ttl_seconds":0}}`: 0,
+		`{"cache":{}}`: 0, `{}`: 0} {
 		if got, err := ParseConfig([]byte(raw)); err != nil || got != want {
 			t.Errorf("%s: got %d err %v, want %d", raw, got, err, want)
 		}
@@ -55,7 +56,7 @@ func TestInitPreservesCustomSettings(t *testing.T) {
 	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %v", info.Mode())
 	}
-	os.WriteFile(path, []byte(`{"cache":{"ttl_seconds":45}}`), 0o600)
+	os.WriteFile(path, []byte(`{"cache":{"enabled":true,"ttl_seconds":45}}`), 0o600)
 	if _, err := InitConfig(); err != nil {
 		t.Fatal(err)
 	}

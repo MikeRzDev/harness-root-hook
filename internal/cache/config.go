@@ -19,8 +19,10 @@ const (
 	MaxTTL     = 31536000
 )
 
-// DefaultConfig is written by InitConfig, formatted like the original Python helper.
-const DefaultConfig = "{\n  \"cache\": {\n    \"enabled\": true,\n    \"ttl_seconds\": 7200\n  }\n}\n"
+// DefaultConfig is written by InitConfig. Caching is off unless enabled is
+// explicitly true: a cached password sits in a store that any process running
+// as the user, including the harness, can read.
+const DefaultConfig = "{\n  \"cache\": {\n    \"enabled\": false,\n    \"ttl_seconds\": 7200\n  }\n}\n"
 
 // ErrConfig reports an invalid settings file. Authentication fails closed on it.
 var ErrConfig = errors.New("invalid harness-root-hook config")
@@ -53,11 +55,11 @@ func expandHome(p string) (string, error) {
 }
 
 // LoadConfig returns the effective TTL in seconds (0 when caching is disabled).
-// A missing file means the defaults. Anything unexpected is an error.
+// A missing file means the defaults (caching off). Anything unexpected is an error.
 func LoadConfig(path string) (int, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return DefaultTTL, nil
+		return 0, nil
 	}
 	if err != nil {
 		return 0, err
@@ -76,10 +78,10 @@ func ParseConfig(data []byte) (int, error) {
 			return 0, fmt.Errorf("%w: config must contain only a cache object", ErrConfig)
 		}
 	}
-	enabled, ttl := true, DefaultTTL
+	enabled, ttl := false, DefaultTTL
 	raw, ok := top["cache"]
 	if !ok {
-		return ttl, nil
+		return 0, nil
 	}
 	settings, err := object(raw)
 	if err != nil {

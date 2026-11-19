@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/cache"
-	"github.com/MikeRzDev/harness-root-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
 )
 
 func jsonString(s string) string { b, _ := json.Marshal(s); return string(b) }

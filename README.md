@@ -1,29 +1,123 @@
-# harness-root-hook
+# Power Sudo Harness Hook
 
-`psudo` runs root commands for **Claude Code** and **Codex** on this computer or
-on a host reached over **SSH**. You type your sudo password into a native desktop
-dialog that shows the host and the exact command. The password never enters the
-model's context, a command line, an environment variable or a plaintext file.
+**Let an AI coding agent run root commands, on your machine or over SSH, without
+ever seeing your password.**
+
+AI coding agents such as **Claude Code** and **Codex** often need root: to install
+a package, restart a service, or fix a server. Plain `sudo` doesn't work for
+them. It needs a terminal the agent doesn't have, and the workarounds are worse:
+`echo password | sudo -S`, `sshpass`, or asking you to paste the password into
+the chat, all of which put your password in the model's context.
+
+This project gives the agent one command instead, **`psudo`** (power sudo). The
+agent writes the command; **you** type the password into a native desktop dialog
+that shows exactly which host and which command you are authorizing. The agent
+only gets the output and the exit code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and macOS](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)
 ![Harnesses: Codex and Claude Code](https://img.shields.io/badge/harness-Codex%20%7C%20Claude%20Code-green)
-[![GitHub stars](https://img.shields.io/github/stars/MikeRzDev/harness-root-hook?style=social)](https://github.com/MikeRzDev/harness-root-hook/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/MikeRzDev/harness-psudo-hook?style=social)](https://github.com/MikeRzDev/harness-psudo-hook/stargazers)
 
 ```sh
-psudo apt install nginx                       # this computer
-psudo -H web1 systemctl restart nginx         # web1 from ~/.ssh/config
+psudo apt install nginx                        # root on this computer
+psudo -H web1 systemctl restart nginx          # root on web1, over SSH
 psudo -H admin@db.example.com sh -c 'journalctl -u postgres | tail -50'
 ```
 
-`psudo` is a single static Go binary with no runtime dependencies such as Python or jq.
+`psudo` is a single static Go binary with no runtime dependencies.
+
+## What it helps with
+
+**Local development.** The agent can install system packages, edit files under
+`/etc`, manage services or fix permissions on your own machine. Each root
+command pops up one dialog: you see `id -u` or `apt install nginx` and decide.
+Cancel, and the command doesn't run.
+
+**Remote development and operations.** The same command works on any host you
+can reach with `ssh`: a VPS, a Raspberry Pi, a homelab node, a jump host. Use
+`psudo -H <host> …`, where `<host>` is anything `ssh` accepts, including the
+aliases in `~/.ssh/config`. The password travels inside the SSH connection,
+never on a command line. Hosts that ask for more than a key at login (a one-time
+code, a password, a key passphrase) work too: ssh's question appears in a
+dialog, and psudo keeps the connection open briefly so you don't type the code
+for every command.
+
+**Clear failures.** When something goes wrong, the agent gets one explicit line
+instead of guessing: `WRONG PASSWORD`, `NOT PERMITTED` (sudoers doesn't allow
+that command), `AUTHENTICATION FAILED`, `SSH FAILED`, or "dialog cancelled". It
+can report the problem instead of trying workarounds.
+
+## How your credentials are handled
+
+| Where | What happens |
+| --- | --- |
+| Typing | You type the sudo password into a native dialog (macOS `osascript`, Linux `zenity` or `kdialog`). The dialog names the host and shows the command verbatim. |
+| Model context | Never. The agent only sees the command's output and exit code. |
+| Command lines and environment | Never. The password is not in any process's argv or environment, locally or on the remote host. |
+| In transit | Through a pipe to sudo on this computer, or through the encrypted SSH channel's stdin to sudo on the remote host. |
+| The command itself | It cannot read the password: its stdin is closed. psudo invalidates sudo's own timestamp first, so a cached sudo ticket can't make the password leak into the command. |
+| Disk | Never in a plaintext file. With the opt-in cache (off by default, see below), the OS credential store holds it. |
+| Wrong password | Reported as `WRONG PASSWORD`, never retried automatically, so you don't hit the host's lockout. |
+| SSH login codes | Typed into an **SSH login** dialog and passed straight to ssh. They are never stored. |
+
+**What psudo can't protect against.** psudo keeps the password away from the
+model. It can't defend against a hostile program already running under your user
+account. Such a program could read the opt-in cache, or use a kept SSH
+connection, while those exist. Both are off or short-lived by default; see
+[Password caching](#password-caching-opt-in) and
+[Hosts that need a code or password](#hosts-that-need-a-code-or-password).
+
+## How it works in Claude Code and Codex
+
+The installer puts `psudo` where the harness can run it and registers hooks, so
+the agent knows to use psudo without you telling it.
+
+| | Claude Code | Codex |
+| --- | --- | --- |
+| Installed at | `~/.claude/hooks/psudo` | `$CODEX_HOME/root-hook/psudo` |
+| At session start | A `SessionStart` hook tells the model: root goes through psudo, `psudo -H` for remote hosts, never handle passwords, and what each exit code means. | The same, through Codex's `SessionStart` hook (trust it once in `/hooks`). |
+| Before each command | A `PreToolUse` guard denies `sudo`, `sshpass`, and reads of psudo's password cache, and points the model to psudo. | Codex has no deny hook; the session context is the guidance. |
+| Approvals | The harness's own approval prompt still applies to every command. psudo adds its dialog on top of it. | Same. |
+
+**The guard.** The Claude Code guard reads each command the way the shell does.
+It denies `sudo` or `sshpass` where they would actually run: as a command, after
+`|` or `&&`, inside `$(…)`, through wrappers such as `env`, `xargs` or
+`find -exec`, or inside code given to `sh -c`, `ssh`, `python3 -c` and the like.
+The word as plain text is fine for data tools (`cat`, `tee`, `echo`, `grep`,
+`git commit -m`, …), so writing notes or commit messages that mention sudo isn't
+blocked. If it can't tell, it denies. It is best effort by design. The real
+backstop is that sudo without a terminal and without your password fails on its
+own.
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant K as Guard hook
+    participant P as psudo
+    participant U as You
+    participant T as Target (local or SSH)
+    M->>K: Bash: sudo …
+    K-->>M: denied, use psudo
+    M->>P: psudo [-H host] cmd
+    P->>U: dialog showing host + command
+    U-->>P: password
+    P->>T: password over stdin pipe / SSH channel
+    Note over T: sudo -k, check password, check sudoers, run cmd with stdin closed
+    T-->>M: output and exit code only
+```
+
+Tested end to end with headless Claude Code (Sonnet 5.5) and Codex (GPT-6.1-sol)
+sessions. Without being told about psudo, both used it for root on this computer
+and over SSH (including an SSH login dialog), and both reported cancels and
+failures accurately.
 
 ## Install
 
 ### From a release
 
 Download the archive for your platform from
-[Releases](https://github.com/MikeRzDev/harness-root-hook/releases), check it
+[Releases](https://github.com/MikeRzDev/harness-psudo-hook/releases), check it
 against `SHA256SUMS`, and run the installer for your harness:
 
 ```sh
@@ -41,12 +135,12 @@ run `xattr -d com.apple.quarantine psudo` first.
 Requires Go 1.22+.
 
 ```sh
-git clone https://github.com/MikeRzDev/harness-root-hook.git
-cd harness-root-hook
+git clone https://github.com/MikeRzDev/harness-psudo-hook.git
+cd harness-psudo-hook
 make install-claude-code     # and/or: make install-codex
 ```
 
-`go install github.com/MikeRzDev/harness-root-hook/cmd/psudo@latest` also works;
+`go install github.com/MikeRzDev/harness-psudo-hook/cmd/psudo@latest` also works;
 then run `psudo --install=…` from `$(go env GOPATH)/bin`.
 
 ### Requirements
@@ -54,11 +148,11 @@ then run `psudo --install=…` from `$(go env GOPATH)/bin`.
 | | macOS | Linux |
 | --- | --- | --- |
 | Dialog | built-in `osascript` | `zenity`, `kdialog`, or `ssh-askpass` with a logged-in desktop |
-| Password cache | login Keychain (built-in) | `secret-tool` (`libsecret-tools`) and a Secret Service provider such as GNOME Keyring |
-| Remote hosts | OpenSSH 8.4+ (built in); key auth, or any login ssh asks for | same |
+| Remote hosts | OpenSSH 8.4+ (built in) | same |
+| Password cache (opt-in) | login Keychain (built-in) | `secret-tool` (`libsecret-tools`) and a Secret Service provider such as GNOME Keyring |
 
-Restart the harness after installing. Each harness guide covers what the installer does:
-[Claude Code](claude-code/README.md) and [Codex](codex/README.md).
+Restart the harness after installing. The harness guides cover each installer
+in detail: [Claude Code](claude-code/README.md) and [Codex](codex/README.md).
 
 ## Usage
 
@@ -66,86 +160,70 @@ Restart the harness after installing. Each harness guide covers what the install
 psudo [-H <host>] [--] <command> [args...]
 ```
 
-- With no `-H`, the command runs on this computer. `<host>` is anything `ssh` accepts, including aliases from `~/.ssh/config`.
-- The command is an argument vector, not a shell string: the target receives exactly the same arguments. For pipelines, pass a shell explicitly: `psudo sh -c '…'`.
-- stdout and stderr pass through unchanged. The command's stdin is closed.
-- psudo accepts no sudo options. Use `psudo runuser -u postgres -- psql` or `sh -c`.
+- With no `-H`, the command runs on this computer.
+- The command is an argument vector, not a shell string: the target receives exactly the same arguments. For pipelines or `cd`, pass a shell: `psudo sh -c '…'`.
+- stdout and stderr pass through unchanged. The command's stdin is closed, so it can't prompt.
+- psudo takes no sudo options. Use `psudo runuser -u postgres -- psql` or `sh -c`.
 
 | Exit code | Meaning |
 | --- | --- |
 | the command's own | The command ran |
 | 2 | Usage error (for example an invalid host) |
-| 250 | No password dialog available, or the cache settings or credential store are unusable |
-| 251 | You cancelled the dialog or it timed out (90 s) |
-| 252 | Authentication failed on the target; the command did not run (see the message below) |
+| 250 | No dialog available, or the cache settings or credential store are unusable |
+| 251 | You cancelled the dialog, or it timed out (90 s) |
+| 252 | Authentication failed on the target; the command did not run |
 | 255 | SSH connection or login failed; no sudo password was requested |
 
-Every failure that psudo itself causes prints one line starting with `psudo:` on stderr.
-For exit 252, that line names the cause:
+Every failure psudo itself causes prints one line starting with `psudo:`. For
+exit 252 it names the cause:
 
 | Message | Meaning |
 | --- | --- |
-| `psudo: WRONG PASSWORD: …` | sudo rejected the password you typed, or a cached password that is no longer valid (the cache entry is then cleared) |
-| `psudo: NOT PERMITTED: …` | the account is not in sudoers, or sudoers does not allow that exact command (checked with `sudo -l` before running) |
-| `psudo: AUTHENTICATION FAILED: …` | any other refusal (for example `requiretty`, or a target that keeps no sudo credential and does not allow `/bin/sh`); sudo's own message is shown above it |
+| `psudo: WRONG PASSWORD: …` | sudo rejected the password (a stale cached one is cleared) |
+| `psudo: NOT PERMITTED: …` | sudoers doesn't allow this account to run that exact command (checked with `sudo -l` before anything runs) |
+| `psudo: AUTHENTICATION FAILED: …` | any other refusal, for example `requiretty`; sudo's own message is shown above it |
 
-A wrong password is never retried automatically, because failures count toward the target's lockout policy.
+### Hosts that need a code or password
 
-### Hosts that need more than a key to log in
+Some hosts ask for more than a key at SSH login. Nothing has to be set up per
+host:
 
-Some hosts ask for more than a key at SSH login: a one-time code (TOTP), a
-password, or a key passphrase. This works the same way for every host, and
-nothing needs to be set up per host:
+1. psudo first tries your `~/.ssh/config` with keys only.
+2. If that fails, psudo logs in itself. Each question ssh asks (for example
+   `Verification code:`) appears in a dialog titled **SSH login**, naming the
+   host. The answer goes straight to ssh and is never stored.
+3. psudo keeps that connection for **30 minutes after its last use**, so later
+   commands to that host only show the sudo dialog. `psudo --ssh-logout`
+   closes it now.
 
-1. psudo first tries your own `~/.ssh/config` with keys only (`BatchMode`).
-2. If that fails, psudo logs in itself. Each question ssh asks appears in a
-   dialog titled **SSH login**, showing the host and ssh's own prompt (for
-   example `Verification code:`). The answer goes straight to ssh through
-   `SSH_ASKPASS` and is never stored.
-3. psudo keeps that connection for **30 minutes after its last use**. Later
-   commands to the same host show only the sudo dialog. `psudo --ssh-logout`
-   closes the connections now.
+A wrong or cancelled login exits 255 before any sudo dialog. If the host key is
+unknown, the login is refused: connect once with `ssh` in a terminal to accept
+it.
 
-A wrong code or a cancelled SSH login exits 255 before the sudo dialog. If the host
-key is unknown, the login is refused. Connect once with `ssh` in a terminal to
-accept the key. The kept connection uses a socket in `/tmp/psudo-<uid>/`
-(Linux: `$XDG_RUNTIME_DIR/psudo/`), mode 0700. While it is open, any process
-running as you can use it. That is the same trade-off as `ControlPersist`
-in your own ssh config.
+**What the kept connection allows:** while it is open, any program running as
+you, including the harness, can run commands on that host as the SSH user
+without the code. If that account has passwordless sudo, that means root
+without a dialog. It's the same trade-off as `ControlPersist` in your own ssh
+config. Run `psudo --ssh-logout` when you're done.
 
-### How it works
+## Password caching (opt-in)
 
-```mermaid
-sequenceDiagram
-    participant M as Model
-    participant K as Guard hook
-    participant P as psudo
-    participant U as You
-    participant T as Target (local or SSH)
-    M->>K: Bash: sudo …
-    K-->>M: denied, use psudo
-    M->>P: psudo [-H host] cmd
-    P->>U: dialog showing host + command
-    U-->>P: password
-    P->>T: password over stdin pipe / SSH channel
-    Note over T: sudo -k, sudo -S -v, then run cmd with stdin closed
-    T-->>M: output and exit code only
-```
+**Off by default**: every command shows the dialog. You can let local commands
+reuse a password for a fixed window (two hours) by setting `"enabled": true` in
+`~/.config/harness-root-hook/config.json`. Remote hosts are never cached.
 
-On the target, psudo reads the password from stdin and closes stdin for
-everything after that. It invalidates sudo's own timestamp, then validates the
-password. If the target keeps sudo's timestamp, it runs the exact command with
-`sudo -n`. If it does not, the command is authenticated inline and runs through
-`/bin/sh` only to keep stdin closed. That fallback needs sudoers to allow
-`/bin/sh` there, which psudo checks before anything runs. The password can never
-flow into the command. The full design is in [docs/psudo.md](docs/psudo.md).
+Read this first: the cached password lives in macOS Keychain or the Linux Secret
+Service, and any program running as you can read it there, including the
+agent's own shell. The Claude Code guard denies commands that read it, but a
+guard can be worked around, and Codex has no deny hook. See
+[password caching](CACHE.md) for details.
 
-## Password caching
+## Limitations
 
-Local commands reuse a verified password for **two hours** by default. It is
-stored only in macOS Keychain or the Linux Secret Service, and the window never
-slides. **Remote hosts always prompt** and are never cached. Set `ttl_seconds` to
-`0` for a dialog on every command. See [password caching](CACHE.md).
+- Commands that need a terminal or their own input (for example a tool that reads a secret with the echo off) can't run through psudo. Run those yourself.
+- The remote login shell must be POSIX-compatible (sh, bash, dash, zsh, ksh). Targets that set `requiretty` are unsupported. Targets that keep no sudo timestamp must allow `/bin/sh` in sudoers.
+- Scripts that call `sudo` internally work only when the whole script is the psudo command.
+- The guard is best effort (see above). psudo does not defend against a hostile program running as your user.
 
 ## Uninstall
 
@@ -157,24 +235,18 @@ slides. **Remote hosts always prompt** and are never cached. Set `ttl_seconds` t
 ## Development
 
 ```sh
-make test       # go vet + unit tests (fake sudo/ssh/dialogs; no real password or root)
+make test       # go vet + unit tests (fake sudo, ssh and dialogs; no real password or root)
 make build      # bin/psudo
 make dist       # cross-compiled archives + SHA256SUMS in dist/
 make release VERSION=v1.2.3   # gh release create from dist/; run deliberately, no CI
 ```
 
-The tests run the local and remote transports through the same suite. They check
-that the password never shows up in output, argv or environment, and that every
-exit code and hook decision matches the spec. Desktop dialogs and real sudo
-still need a manual smoke test (see the harness guides).
-
-## Limitations
-
-- Commands that need a terminal or their own stdin (for example a tool that reads a secret with the echo off) cannot run through psudo. Run those yourself in a terminal.
-- The remote login shell must be POSIX-compatible. Targets that set `requiretty` are unsupported. Targets that keep no sudo timestamp must allow `/bin/sh` in sudoers.
-- Scripts that call `sudo` internally work only when the whole script is the psudo command.
-- The Claude Code guard can deny harmless commands that contain the word `sudo` (for example `grep x /var/log/sudo.log`).
-- psudo keeps the password away from the model. It does not defend against a hostile process running as your user.
+The local and remote transports run through the same test suite. It checks that
+the password never appears in output, argv or environment, and that every exit
+code and hook decision matches the spec. The full design is in
+[docs/psudo.md](docs/psudo.md). Names on disk (the config directory,
+credential-store entries, launchd task, `HARNESS_ROOT_HOOK_CONFIG`) keep the
+project's earlier name, `harness-root-hook`, so existing installs keep working.
 
 ## License
 

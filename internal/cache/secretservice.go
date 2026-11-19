@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
 )
 
 // SecretService stores records in the desktop Secret Service via secret-tool.

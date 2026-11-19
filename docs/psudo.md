@@ -1,4 +1,4 @@
-# psudo: secure sudo credential prompt for agent harnesses
+# Power Sudo Harness Hook (psudo): secure sudo credential prompt for agent harnesses
 
 Status: implemented (v1), see "Implementation decisions" at the end
 Date: 2026-11-18
@@ -169,7 +169,7 @@ No automatic retries on a wrong password, since repeated failures count against 
 
 - Scripts that call `sudo` internally do not work unless the whole script is run as the `psudo` command.
 - Targets configured to require a terminal for sudo are unsupported.
-- The hook can produce false positives on harmless commands that contain the word `sudo` (for example searching a log for it).
+- The hook reads the command like the shell does, so the word as data (a heredoc written to a file, a commit message, a grep pattern) is allowed. A computed command name or an unparseable command falls back to the plain word match. See §11.10.
 - One prompt per invocation can be tedious for long sessions (see open questions).
 
 ## 9. Acceptance criteria
@@ -193,7 +193,9 @@ No automatic retries on a wrong password, since repeated failures count against 
 
 The implementation is the Go binary in `cmd/psudo`. It differs from or extends the draft above in these places:
 
-1. **Local password cache (departs from §2 and invariant 3).** Local `psudo` keeps the repository's existing fixed-window cache: two hours by default, stored only in macOS Keychain or the Linux Secret Service, never in a plaintext file. While a cached password is valid, no dialog appears, so invariant 5 then rests on the harness's own approval prompt. Set `cache.ttl_seconds` to `0` in `~/.config/harness-root-hook/config.json` to get the strict behaviour of the draft. Remote hosts are never cached; every `psudo -H` prompts.
+1. **Local password cache: opt-in (departs from §2 and invariant 3 only when turned on).** Off by default, which matches the draft. With `"enabled": true` in `~/.config/harness-root-hook/config.json`, local `psudo` keeps a fixed window (`ttl_seconds`, 7200), stored only in macOS Keychain or the Linux Secret Service, never in a plaintext file. While a cached password is valid, no dialog appears, so invariant 5 then rests on the harness's own approval prompt.
+   - **It also weakens invariant 1.** Those stores return the password to any process running as the user: on macOS through `/usr/bin/security`, which the entry trusts, and on Linux through an unlocked Secret Service. That includes the harness's shell. The Claude Code guard denies `security` or `secret-tool` commands on `harness-root-hook` entries (§11.10). This is why the cache is off by default.
+   - Remote hosts are never cached; every `psudo -H` prompts.
 2. **A rejected cached password** clears the entry and exits 252 without re-prompting. The next invocation shows the dialog.
 3. **Execution script.** Both transports run the same fixed `/bin/sh` script with the sudo path, a random marker and the argument vector as positional parameters.
    - The script reads the password line into a shell variable that is never exported and never in any process's argv. It then closes stdin (`exec </dev/null`). Each sudo that needs the password gets it through a pipe from the `printf` builtin.
@@ -212,6 +214,15 @@ The implementation is the Go binary in `cmd/psudo`. It differs from or extends t
 7. **Dialog timeout.** 90 seconds, below Claude Code's 120-second default command timeout.
 8. **Codex** gets psudo through its SessionStart context instead of a deny hook, matching the previous Codex integration, which installed no permission hooks.
 9. **Exit code 2** is used for usage errors, which the draft did not cover. Exit 250 also covers an invalid cache config file or an unavailable credential store (fail closed).
+10. **The hook parses the command (refines §6.4).** Matching the word anywhere denied ordinary work: heredocs written to files, commit messages, grep patterns. The hook now tokenizes the command like a POSIX shell: quotes, escapes, comments, heredocs, `$(…)`, backticks and redirections.
+    - It denies when `sudo` or `sshpass` is the program a simple command runs. That holds after assignments, reserved words such as `if`, `then`, `do` and `!`, and wrappers such as `env`, `xargs`, `nohup`, `time`, `exec` and `timeout`.
+    - It also denies when either word appears inside code: an argument, heredoc or here-string of `sh`, `bash`, `zsh`, `ssh`, `eval` or `su`, data piped into one of those, or a command substitution. That includes unquoted heredoc bodies.
+    - Interpreters (python, perl, ruby, node, awk, osascript and others) count as code carriers too.
+    - The word as text is allowed only for known data programs: cat, tee, echo, printf, grep/rg, git (not with -c), gh (not alias), and file tools such as ls, cp, mv, mkdir and jq. Every other program is judged on its full text, so an unknown program fails closed.
+    - psudo's own arguments are trusted only when the command word resolves to the installed binary. A program merely named psudo is judged like any other.
+    - A computed program name (`$cmd`) or a command it cannot parse falls back to the plain word match, so failure still denies.
+    - It also denies `security` or `secret-tool` commands that name a `harness-root-hook` entry (§11.1).
+    - It remains best effort: §6.4's backstop still applies.
 
 Additional limitations:
 

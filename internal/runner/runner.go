@@ -20,9 +20,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/cache"
-	"github.com/MikeRzDev/harness-root-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-root-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
 )
 
 // Exit codes from spec §6.1.

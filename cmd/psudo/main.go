@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/cache"
-	"github.com/MikeRzDev/harness-root-hook/internal/guard"
-	"github.com/MikeRzDev/harness-root-hook/internal/install"
-	"github.com/MikeRzDev/harness-root-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-root-hook/internal/runner"
-	"github.com/MikeRzDev/harness-root-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/guard"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/install"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
 )
 
 var version = "dev"

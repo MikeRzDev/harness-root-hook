@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/cache"
-	"github.com/MikeRzDev/harness-root-hook/internal/shquote"
-	"github.com/MikeRzDev/harness-root-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
 )
 
 const (
@@ -177,7 +177,7 @@ func (in *Installer) InstallClaudeCode() error {
 	}
 	in.say("Installed %s", binary)
 	in.say("Registered the PreToolUse guard and the SessionStart context in %s", settings)
-	in.say("Settings: %s (password cache: two hours by default; local commands only)", configPath)
+	in.say("Settings: %s (password cache: off by default; set \"enabled\": true to cache local commands)", configPath)
 	in.say("Restart Claude Code, then ask it to run: %s id -u", binary)
 	return nil
 }

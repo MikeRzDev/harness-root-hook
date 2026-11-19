@@ -1,6 +1,6 @@
 # Codex
 
-Part of [harness-root-hook](../README.md). For Claude Code, see the [Claude Code guide](../claude-code/README.md).
+Part of [Power Sudo Harness Hook](../README.md). For Claude Code, see the [Claude Code guide](../claude-code/README.md).
 
 ## Install
 
@@ -32,8 +32,9 @@ Ask Codex to perform the administrative task. Its commands should look like:
 ```
 
 A dialog shows the host and command. Enter your sudo password there, never in
-chat. Local passwords are cached for two hours in a credential-store entry
-separate from Claude Code's. Remote hosts always prompt. See
+chat. Local password caching is off by default (see the risk in CACHE.md); when
+turned on, Codex has its own credential-store entry, separate from Claude Code's.
+Remote hosts always prompt. See
 [password caching](../CACHE.md).
 
 For Codex versions without hooks, give Codex the helper's absolute path in your

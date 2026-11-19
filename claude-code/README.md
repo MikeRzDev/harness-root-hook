@@ -1,6 +1,6 @@
 # Claude Code
 
-Part of [harness-root-hook](../README.md). For Codex, see the [Codex guide](../codex/README.md).
+Part of [Power Sudo Harness Hook](../README.md). For Codex, see the [Codex guide](../codex/README.md).
 
 ## Install
 
@@ -66,7 +66,7 @@ Ask Claude Code to run each of these:
 
 1. `sudo id -u`: denied, with the psudo hint.
 2. `~/.claude/hooks/psudo id -u`: one dialog naming *this computer* and `id -u`, then `0`.
-   Run it again within two hours and no dialog appears.
+   With the cache off (the default) every run shows the dialog.
 3. `~/.claude/hooks/psudo -H <your-ssh-alias> id -u`: a dialog naming the host, then `0`.
    Every remote run prompts.
 4. Cancel a dialog: exit 251. Enter a wrong password: exit 252, and the command does not run.

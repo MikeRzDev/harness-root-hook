@@ -42,13 +42,91 @@ func TestDecisionMatrix(t *testing.T) {
 		"(sudo id)":                             "deny",
 		"~/.claude/hooks/psudo id -u":           "allow",
 		"cat ~/.claude/hooks/psudo":             "allow",
-		"grep error /var/log/sudo.log":          "deny", // documented false positive
+		"grep error /var/log/sudo.log":          "allow",
 		"ls /etc/sudoers.d":                     "allow",
 		"grep pseudo notes.txt":                 "allow",
+
+		// The word as data: these blocked real work before.
+		"cat >> specs/PROGRESS.md <<'EOF'\n13. Ran `sudo fleet-ca krl push` through psudo.\nEOF": "allow",
+		"cat > notes.md <<EOF\nsudo is denied; use psudo\nEOF":                                   "allow",
+		`git commit -m "Explain why sudo is denied"`:                                             "allow",
+		`grep -rn 'sudo' docs`:                                      "allow",
+		`echo "run psudo, not sudo"`:                                "allow",
+		"# sudo is not used here\nls":                               "allow",
+		"/home/u/.claude/hooks/psudo sh -c 'sudo -u postgres psql'": "allow",
+		"env cat > f <<'EOF'\nsudo\nEOF":                            "allow",
+		"cat <<'EOF'\n$(sudo id)\nEOF":                              "allow",
+
+		// Ways to actually run it: all denied.
+		"env FOO=1 sudo id":          "deny",
+		"FOO=1 sudo id":              "deny",
+		"xargs sudo rm < list":       "deny",
+		"nohup sudo id &":            "deny",
+		"time sudo id":               "deny",
+		"! sudo id":                  "deny",
+		"exec sudo id":               "deny",
+		"2>/dev/null sudo id":        "deny",
+		`"sudo" id`:                  "deny",
+		`s\udo id`:                   "deny",
+		"'/usr/bin/sudo' id":         "deny",
+		"echo $(sudo id)":            "deny",
+		"echo \"$(sudo id)\"":        "deny",
+		"x=`sudo id`":                "deny",
+		"cat <<EOF\n$(sudo id)\nEOF": "deny",
+		"ssh host 'sudo systemctl restart nginx'": "deny",
+		"bash -c \"sudo id\"":                     "deny",
+		`echo "sudo id" | sh`:                     "deny",
+		"ssh host <<'EOF'\nsudo id\nEOF":          "deny",
+		"sh <<< 'sudo id'":                        "deny",
+		"S=sudo; $S id":                           "deny",
+		"if true; then sudo id; fi":               "deny",
+		"{ sudo id; }":                            "deny",
+		"for h in a b; do sudo id; done":          "deny",
+		"ls &&\nsudo id":                          "deny",
+		"ls | sudo tee /etc/x":                    "deny",
+		"echo 'unterminated sudo":                 "deny", // unparseable: falls back to the word match
+		"eval \"sudo id\"":                        "deny",
+		"watch sudo id":                           "deny",
+
+		// Found by review: interpreters, more wrappers, unknown programs, fake psudo.
+		"python3 - <<'EOF'\nprint('sudo')\nEOF":          "deny",
+		"python3 -c 'import os; os.system(\"sudo id\")'": "deny",
+		"perl -e 'system \"sudo id\"'":                   "deny",
+		"awk 'BEGIN{system(\"sudo id\")}'":               "deny",
+		"find . -name x -exec sudo rm {} +":              "deny",
+		"setsid sudo id":                                 "deny",
+		"flock /tmp/l sudo id":                           "deny",
+		"make SUDO=sudo install":                         "deny",
+		"/tmp/psudo sudo id":                             "deny",
+		"psudo sh -c 'sudo id'":                          "deny",
+		"git -c alias.x='!sudo id' x":                    "deny",
+		"gh alias set x '!sudo id'":                      "deny",
+		"echo 'sudo id' | python3":                       "deny",
 	} {
 		if got := decide(t, bash(command)); got != want {
 			t.Errorf("%q: %s, want %s", command, got, want)
 		}
+	}
+}
+
+func TestPasswordCacheReadsAreDenied(t *testing.T) {
+	for command, want := range map[string]string{
+		"security find-generic-password -w -s harness-root-hook.claude-code": "deny",
+		"/usr/bin/security find-generic-password -s harness-root-hook.codex": "deny",
+		"secret-tool lookup application harness-root-hook harness codex":     "deny",
+		"bash -c 'security find-generic-password -w -s harness-root-hook.x'": "deny",
+		"security find-generic-password -s some-other-service":               "allow",
+		"psudo --clear-cache":              "allow",
+		"grep harness-root-hook README.md": "allow",
+	} {
+		if got := decide(t, bash(command)); got != want {
+			t.Errorf("%q: %s, want %s", command, got, want)
+		}
+	}
+	var out bytes.Buffer
+	ClaudeCode(strings.NewReader(bash("security find-generic-password -w -s harness-root-hook.codex")), &out, "/p")
+	if !strings.Contains(out.String(), "must never be read") {
+		t.Fatalf("cache reason %s", out.String())
 	}
 }
 

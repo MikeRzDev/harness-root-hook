@@ -1,15 +1,25 @@
 # Password caching
 
 Codex and Claude Code use the same cache implementation (built into `psudo`) and
-JSON settings on Linux and macOS. After you enter a valid **sudo password** in the
-desktop dialog for a command on this computer, psudo reuses it for **two hours**
-by default. This is normally your own account password, not a separate root
-password.
+JSON settings on Linux and macOS. **Caching is off by default**: every command
+shows the dialog. When you turn it on (`"enabled": true`), psudo reuses a
+**sudo password** that sudo accepted for a command on this computer for
+`ttl_seconds` (7200, two hours). This is normally your own account password, not
+a separate root password.
+
+**Read this before turning it on.** The OS credential store doesn't keep the
+password from other programs running as you. On macOS the Keychain entry trusts
+`/usr/bin/security`. On Linux, an unlocked Secret Service returns it to any
+client. So the harness's own shell can read it with one command
+(`security find-generic-password -w …` or `secret-tool lookup …`), which would
+put your password in the model's context. The Claude Code guard denies commands
+that read `harness-root-hook` entries, but a guard can be worked around. Codex
+has no deny hook at all.
 
 **Only local commands are cached.** `psudo -H <host>` always shows the dialog,
 and remote passwords are never stored. While a local password is cached, no
 dialog appears, so the harness's own approval prompt is what shows you the
-command. Set `ttl_seconds` to `0` to see the dialog for every command.
+command.
 
 The window starts at successful authentication. Repeated commands **do not extend
 it**. At expiry, the next privileged command requests your password again. Each
@@ -27,15 +37,18 @@ Both installers create this file if it is missing and preserve your edits:
 ```json
 {
   "cache": {
-    "enabled": true,
+    "enabled": false,
     "ttl_seconds": 7200
   }
 }
 ```
 
 See [config.example.json](config.example.json). The file contains settings only;
-never put a password in it. `ttl_seconds` is an integer from 0 to 31536000. Set
-`enabled` to `false` or `ttl_seconds` to `0` to disable caching.
+never put a password in it. `ttl_seconds` is an integer from 0 to 31536000.
+Caching is on only when `enabled` is explicitly `true` and `ttl_seconds` is above
+`0`. A missing file, a missing `enabled` key or `"enabled": false` all mean off.
+Configs written by earlier versions say `"enabled": true` and keep caching until
+you change them.
 
 The path follows `XDG_CONFIG_HOME` when set. Set `HARNESS_ROOT_HOOK_CONFIG` to an
 absolute JSON file path to override it. Set the override both during installation

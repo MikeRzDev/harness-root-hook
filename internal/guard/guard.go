@@ -8,15 +8,16 @@ import (
 	"io"
 	"regexp"
 
-	"github.com/MikeRzDev/harness-root-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
 )
 
 // pattern matches sudo or sshpass as standalone words, like grep -w.
 // "psudo" does not match because "p" is a word character.
 var pattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])(sudo|sshpass)([^A-Za-z0-9_]|$)`)
 
-// Denied reports whether a Bash command must be refused.
-func Denied(command string) bool { return pattern.MatchString(command) }
+// Denied reports whether a Bash command must be refused: it would run sudo or
+// sshpass, or read psudo's password cache (see shell.go).
+func Denied(command string) bool { return judge(command, "") != allow }
 
 // Reason is shown to the model when a command is denied.
 func Reason(psudo string) string {
@@ -24,6 +25,10 @@ func Reason(psudo string) string {
 		"psudo is installed at " + shquote.Quote(psudo) + "; invoke it by that path if `psudo` is not on PATH. " +
 		"Never ask for or handle the password."
 }
+
+// CacheReason is shown when a command would read psudo's password cache.
+const CacheReason = "psudo's cached sudo password must never be read from the harness: do not run security or " +
+	"secret-tool on harness-root-hook entries. To clear the cache, run psudo --clear-cache."
 
 type hookOutput struct {
 	HookSpecificOutput map[string]string `json:"hookSpecificOutput"`
@@ -35,11 +40,13 @@ func encode(out io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func deny(out io.Writer, psudo string) error {
+func deny(out io.Writer, psudo string) error { return denyWith(out, Reason(psudo)) }
+
+func denyWith(out io.Writer, reason string) error {
 	return encode(out, hookOutput{map[string]string{
 		"hookEventName":            "PreToolUse",
 		"permissionDecision":       "deny",
-		"permissionDecisionReason": Reason(psudo),
+		"permissionDecisionReason": reason,
 	}})
 }
 
@@ -62,8 +69,14 @@ func ClaudeCode(in io.Reader, out io.Writer, psudo string) error {
 	if len(event.ToolInput) > 0 && json.Unmarshal(event.ToolInput, &input) != nil {
 		return deny(out, psudo)
 	}
-	if input.Command != nil && Denied(*input.Command) {
+	if input.Command == nil {
+		return nil
+	}
+	switch judge(*input.Command, psudo) {
+	case denyRoot:
 		return deny(out, psudo)
+	case denyCache:
+		return denyWith(out, CacheReason)
 	}
 	return nil
 }
