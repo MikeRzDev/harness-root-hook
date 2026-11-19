@@ -36,6 +36,7 @@ func worse(a, b verdict) verdict {
 type word struct {
 	text    string
 	dynamic bool
+	opaque  bool // contains $'…', whose text cannot be judged
 }
 
 type heredoc struct {
@@ -103,6 +104,7 @@ var (
 	assignment   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 	cachePattern = regexp.MustCompile(`harness-root-hook`)
 	cacheToolPat = regexp.MustCompile(`(^|[^A-Za-z0-9_-])(security|secret-tool)([^A-Za-z0-9_-]|$)`)
+	caseWord     = regexp.MustCompile(`(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)`)
 )
 
 // textVerdict is the plain-text rule, used for code the guard does not parse
@@ -505,11 +507,17 @@ func (p *parser) expansion(b *strings.Builder, w *word) {
 			p.bad = true
 			return
 		}
-		if !strings.HasPrefix(s[p.i:], "$((") {
-			p.substitute(s[p.i+2 : end])
-		}
-		if strings.HasPrefix(s[p.i:], "$((") && end+1 < len(s) && s[end+1] == ')' {
-			end++
+		if strings.HasPrefix(s[p.i:], "$((") {
+			// Arithmetic: not a command, but $(…) inside it still runs.
+			p.scanExpansions(s[p.i+2 : end])
+		} else {
+			inner := s[p.i+2 : end]
+			if caseWord.MatchString(inner) {
+				// case patterns end in ")", which this matcher cannot pair
+				// reliably: deny rather than misread where the code ends.
+				p.nested = worse(p.nested, denyRoot)
+			}
+			p.substitute(inner)
 		}
 		b.WriteString(s[p.i : end+1])
 		p.i = end + 1
@@ -519,8 +527,27 @@ func (p *parser) expansion(b *strings.Builder, w *word) {
 			p.bad = true
 			return
 		}
+		// ${x:-$(…)} and similar run their command substitutions.
+		p.scanExpansions(s[p.i+2 : p.i+end])
 		b.WriteString(s[p.i : p.i+end+1])
 		p.i += end + 1
+	case '\'':
+		// $'…' (ANSI-C quoting) can spell any word in escapes, so its
+		// content cannot be judged as text.
+		w.opaque = true
+		j := p.i + 2
+		for j < len(s) && s[j] != '\'' {
+			if s[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(s) {
+			p.bad = true
+			return
+		}
+		b.WriteString(s[p.i : j+1])
+		p.i = j + 1
 	default:
 		b.WriteByte('$')
 		p.i++
@@ -562,7 +589,7 @@ func (pl *pipeline) verdict(full, self string) verdict {
 func (c *simpleCmd) textVerdict() verdict {
 	v := allow
 	for _, w := range c.words {
-		v = worse(v, textVerdict(w.text))
+		v = worse(v, wordVerdict(w))
 	}
 	for _, d := range c.heredocs {
 		v = worse(v, textVerdict(d.body))
@@ -589,9 +616,10 @@ func (c *simpleCmd) verdict(full, self string) (verdict, bool) {
 		case name == "psudo" && isSelf(cw.text, self):
 			// The real psudo runs its arguments as root; sudo inside is harmless.
 			return allow, false
-		case cw.dynamic:
-			// The program is computed: judge the whole command as text.
-			return textVerdict(full), true
+		case cw.dynamic || cw.opaque:
+			// The program is computed ($cmd, ${x:-…}, $'\x..'): it cannot be
+			// judged, so deny.
+			return denyRoot, true
 		case cacheTools[name]:
 			for _, w := range c.words[k+1:] {
 				if cachePattern.MatchString(w.text) {
@@ -617,26 +645,54 @@ func (c *simpleCmd) verdict(full, self string) (verdict, bool) {
 			}
 			k = next
 			continue
-		case dataCommands[name] && !c.codeOptions(name, k):
-			return allow, false
+		case dataCommands[name]:
+			return c.dataVerdict(name, k), false
 		}
 		// Unknown program: fail closed on its full text.
 		return c.textVerdict(), false
 	}
 }
 
-// codeOptions reports options that make a data program run code:
-// git -c (aliases, pagers, hooks) and gh alias.
-func (c *simpleCmd) codeOptions(name string, k int) bool {
-	for _, w := range c.words[k+1:] {
-		switch {
-		case name == "git" && (strings.HasPrefix(w.text, "-c") || strings.HasPrefix(w.text, "--config-env")):
-			return true
-		case name == "gh" && w.text == "alias":
-			return true
-		}
+// wordVerdict judges one word as text; $'…' content cannot be judged.
+func wordVerdict(w word) verdict {
+	if w.opaque {
+		return denyRoot
 	}
-	return false
+	return textVerdict(w.text)
+}
+
+// textArgs are data programs with no option that runs a program, so their
+// arguments are always text.
+var textArgs = map[string]bool{"echo": true, "printf": true, "grep": true, "egrep": true, "fgrep": true}
+
+// dataVerdict judges a data program at index k. Its here-documents and
+// here-strings are text. Its arguments are text only for textArgs and for
+// the message of git commit -m. Everything else, including variables set
+// before it (GIT_PAGER=…, LESSOPEN=…) and options that run a program
+// (man -P, rg --pre, sort --compress-program, git --upload-pack), is judged
+// as text.
+func (c *simpleCmd) dataVerdict(name string, k int) verdict {
+	v := allow
+	for _, w := range c.words[:k] {
+		v = worse(v, wordVerdict(w))
+	}
+	if textArgs[name] {
+		return v
+	}
+	args := c.words[k+1:]
+	commit := name == "git" && len(args) > 0 && args[0].text == "commit"
+	for i := 0; i < len(args); i++ {
+		t := args[i].text
+		if commit && (t == "-m" || t == "--message") {
+			i++ // the message itself
+			continue
+		}
+		if commit && (strings.HasPrefix(t, "-m") || strings.HasPrefix(t, "--message=")) {
+			continue
+		}
+		v = worse(v, wordVerdict(args[i]))
+	}
+	return v
 }
 
 // isSelf reports whether a command word names the installed psudo: by path

@@ -102,6 +102,33 @@ func TestDecisionMatrix(t *testing.T) {
 		"git -c alias.x='!sudo id' x":                    "deny",
 		"gh alias set x '!sudo id'":                      "deny",
 		"echo 'sudo id' | python3":                       "deny",
+
+		// Found by review: variables and exec options on data programs.
+		"GIT_PAGER='sudo id' git log":                "deny",
+		"env GIT_PAGER='sudo id' git log":            "deny",
+		"LESSOPEN='|sudo id %s' less f":              "deny",
+		"man -P 'sudo id' ls":                        "deny",
+		"rg --pre 'sudo id' pattern":                 "deny",
+		"sort --compress-program=sudo f":             "deny",
+		"git --upload-pack='sudo x' fetch origin":    "deny",
+		"git commit -m 'fix' --exec-path='sudo x'":   "deny",
+		"git config alias.x '!sudo id'":              "deny",
+		"ln -s /usr/bin/sudo ./x":                    "deny",
+		"git commit -F - <<'EOF'\nExplain sudo\nEOF": "allow",
+		"git commit --message='Explain sudo'":        "allow",
+		"tee notes.md <<< 'use psudo, not sudo'":     "allow",
+
+		// Found by review: computed names, ANSI-C quoting, ${…}, $((…)), case.
+		`$'\x73udo' id`:                       "deny",
+		`sh -c $'\x73udo id'`:                 "deny",
+		"${SUDO:-sudo} id":                    "deny",
+		"$EDITOR notes.md":                    "deny",
+		"echo ${x:-$(sudo id)}":               "deny",
+		"echo $(( $(sudo id) + 1 ))":          "deny",
+		"echo $(case x in a) sudo id;; esac)": "deny",
+		`echo $'tab\there'`:                   "allow",
+		"echo $((1 + 2))":                     "allow",
+		"echo ${HOME}/notes":                  "allow",
 	} {
 		if got := decide(t, bash(command)); got != want {
 			t.Errorf("%q: %s, want %s", command, got, want)
