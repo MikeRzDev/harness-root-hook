@@ -1,0 +1,222 @@
+# psudo: secure sudo credential prompt for agent harnesses
+
+Status: implemented (v1), see "Implementation decisions" at the end
+Date: 2026-11-18
+
+## 1. Purpose
+
+Let an AI coding harness (Claude Code first) run privileged commands, on the local machine or on a host reached over SSH, without the sudo password ever being visible to the model.
+
+The human types the password into a native dialog on the machine where the harness runs. The harness sees only the command's output and exit code.
+
+## 2. Scope
+
+In scope:
+
+- Privileged commands on the local machine.
+- Privileged commands on a remote host over SSH (key-based auth; see §11.6 for interactive logins).
+- macOS and Linux desktops as the machine where the harness runs.
+- Enforcement so the model cannot use plain `sudo` instead.
+
+Out of scope (v1):
+
+- Harness running on a headless machine with no display.
+- Commands that need their own stdin.
+- Credential caching across invocations (every invocation prompts).
+- Windows.
+- SSH password authentication (the tool never prompts for SSH credentials).
+
+## 3. Security invariants
+
+These are the requirements that matter most. Any implementation choice that breaks one is wrong.
+
+1. **The password never enters model context.** It must not appear in tool input, tool output, stderr, the transcript, or logs.
+2. **The password never appears in a command line or environment variable**, locally or remotely. It travels only over a pipe (local) or the SSH channel's stdin (remote).
+3. **The password is never written to disk** and is discarded as soon as it has been handed to sudo.
+4. **The privileged command can never read the password.** Its stdin is closed or empty.
+5. **The human sees what they authorize.** The dialog shows the target host and the full command verbatim.
+6. **Model-controlled text is data, never code.** Host names and command text shown in the dialog must be passed as arguments, not interpolated into script source.
+7. **Failure is closed.** If anything in the path fails, the privileged command does not run.
+
+## 4. Components
+
+| Component | Role | Runs where |
+|---|---|---|
+| `psudo` CLI | Single entry point for privileged commands | Harness machine |
+| Prompt provider | Shows the dialog, returns the password | Harness machine |
+| Enforcement hook | Denies bare `sudo`, points the model to `psudo` | Harness (PreToolUse) |
+| Skill (optional) | One paragraph telling the model the convention | Harness |
+
+The hook is the control. The skill only saves a denied turn and carries no security weight.
+
+## 5. Flow
+
+```mermaid
+sequenceDiagram
+    participant M as Model
+    participant H as Harness
+    participant K as Hook
+    participant P as psudo
+    participant U as User
+    participant T as Target, local or SSH host
+    M->>H: Bash with bare sudo
+    H->>K: PreToolUse
+    K-->>H: deny, use psudo
+    H-->>M: denial reason
+    M->>H: Bash with psudo
+    H->>K: PreToolUse
+    K-->>H: allow
+    H->>P: run
+    P->>U: dialog showing host and command
+    U-->>P: password or cancel
+    P->>T: password over stdin
+    T-->>P: command output and exit code
+    P-->>M: output and exit code only
+```
+
+## 6. Contracts
+
+### 6.1 CLI
+
+```
+psudo [-H <host>] [--] <command> [args...]
+```
+
+- Without `-H`, the target is the local machine.
+- `<host>` is anything `ssh` accepts as a destination, including aliases from the user's SSH config.
+- `<command> [args...]` is an argument vector, not a shell string. The target must receive exactly the same arguments. A caller who wants a pipeline passes an explicit shell, e.g. `psudo sh -c '...'`.
+- stdout and stderr of the privileged command pass through unchanged.
+- Local and remote targets use the same execution sequence (6.3); only the transport differs.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| command's own code | The privileged command ran |
+| 250 | No prompt provider available (no display) |
+| 251 | User cancelled or the dialog timed out |
+| 252 | sudo rejected the password or the user is not permitted |
+| 255 | SSH transport or SSH authentication failure |
+
+Every failure that originates in `psudo` writes one line to stderr prefixed with `psudo:` so the model can tell it apart from the command's own errors. These messages never include the password.
+
+### 6.2 Prompt provider
+
+- Input: the target host label and the command text.
+- Output: the password on stdout, exit 0. Non-zero exit means cancel.
+- Hidden text entry.
+- Has a timeout shorter than the harness's command timeout; on expiry it behaves as cancel.
+- Backends: native dialog on macOS, a standard password dialog on Linux desktops.
+- Replaceable, so a different provider (for example a phone approval) can be added later without changing the CLI.
+
+### 6.3 Execution sequence on the target
+
+Three distinct steps, in this order:
+
+1. **Invalidate** any cached sudo credential.
+2. **Validate** using the password read from stdin, with sudo's own prompt text suppressed.
+3. **Execute** the command non-interactively with stdin closed.
+
+Why this matters:
+
+- Without step 1, a cached credential makes sudo skip reading stdin, and the password would flow into the command as input (violates invariant 4).
+- Keeping steps 2 and 3 separate lets `psudo` tell a rejected password (252) apart from a command that exits non-zero.
+
+For remote targets, SSH runs in batch mode so it can never fall back to prompting.
+
+### 6.4 Enforcement hook
+
+- Event: PreToolUse, tool: Bash.
+- Rule: deny when the command contains `sudo` as a standalone word anywhere, or contains `sshpass`. `psudo` itself must not match.
+- Denial message, returned to the model:
+
+  > Use `psudo <command>` (local) or `psudo -H <host> <command>` (remote). Never ask for or handle the password.
+
+Decision matrix:
+
+| Command | Decision |
+|---|---|
+| `sudo apt install x` | deny |
+| `ssh host sudo systemctl restart nginx` | deny |
+| `echo ... \| sudo -S ...` | deny |
+| `sshpass -p ... ssh host` | deny |
+| `psudo apt install x` | allow |
+| `psudo -H host systemctl restart nginx` | allow |
+| `psudo ls && sudo rm x` | deny |
+| `cat /etc/sudoers` | allow |
+
+The hook is best effort by design. The backstop is that sudo without a terminal and without a password fails on its own, so a command that slips past the pattern still fails closed.
+
+### 6.5 Skill (optional)
+
+A short instruction: privileged commands go through `psudo`; never request, echo, or store a password in conversation.
+
+## 7. Failure behaviour
+
+| Situation | Result |
+|---|---|
+| User cancels the dialog | 251, command not run |
+| Dialog times out | 251, command not run |
+| Wrong password | 252, command not run, no automatic retry |
+| No display available | 250, command not run |
+| SSH unreachable or key rejected | 255, no dialog shown if detectable beforehand |
+| User not in sudoers on the target | 252 |
+| Privileged command fails | Its own exit code and stderr |
+
+No automatic retries on a wrong password, since repeated failures count against the target's lockout policy.
+
+## 8. Known limitations
+
+- Scripts that call `sudo` internally do not work unless the whole script is run as the `psudo` command.
+- Targets configured to require a terminal for sudo are unsupported.
+- The hook can produce false positives on harmless commands that contain the word `sudo` (for example searching a log for it).
+- One prompt per invocation can be tedious for long sessions (see open questions).
+
+## 9. Acceptance criteria
+
+1. With a known test password, a full run leaves no trace of it in the harness transcript, process listings on either machine, shell history, or any log file.
+2. With a valid cached sudo credential on the target, a command that echoes its stdin outputs nothing.
+3. A command containing quotes and script metacharacters is displayed verbatim in the dialog and does not alter the dialog's behaviour.
+4. Arguments containing spaces and quotes arrive on a remote target as the same argument vector.
+5. Each row in the failure table (7) produces the stated exit code, and the command does not run where stated.
+6. Each row in the hook matrix (6.4) produces the stated decision.
+7. The local and remote paths pass the same test suite.
+
+## 10. Open questions
+
+1. **Session unlock:** should there be an opt-in mode where one approval covers several commands for a short window? This trades invariant 5 for convenience.
+2. **Headless harness:** which provider to add first, a remote approval channel or a documented scoped `NOPASSWD` fallback?
+3. **Audit log:** should `psudo` record timestamp, host, command, and outcome locally?
+4. **Other harnesses:** should the hook be specified generically so the same policy can be ported to Hermes or a custom harness?
+
+## 11. Implementation decisions
+
+The implementation is the Go binary in `cmd/psudo`. It differs from or extends the draft above in these places:
+
+1. **Local password cache (departs from §2 and invariant 3).** Local `psudo` keeps the repository's existing fixed-window cache: two hours by default, stored only in macOS Keychain or the Linux Secret Service, never in a plaintext file. While a cached password is valid, no dialog appears, so invariant 5 then rests on the harness's own approval prompt. Set `cache.ttl_seconds` to `0` in `~/.config/harness-root-hook/config.json` to get the strict behaviour of the draft. Remote hosts are never cached; every `psudo -H` prompts.
+2. **A rejected cached password** clears the entry and exits 252 without re-prompting. The next invocation shows the dialog.
+3. **Execution script.** Both transports run the same fixed `/bin/sh` script with the sudo path, a random marker and the argument vector as positional parameters.
+   - The script reads the password line into a shell variable that is never exported and never in any process's argv. It then closes stdin (`exec </dev/null`). Each sudo that needs the password gets it through a pipe from the `printf` builtin.
+   - Steps: `sudo -k`, then `sudo -S -p '' -v` (with `LC_ALL=C`, so its refusal message can be classified).
+   - Before the command runs, the script prints one status line, `<marker> <status>`, where status is `ok`, `badpw`, `denied`, `authfail`, `nosudo` or `noshell`. psudo turns these into the explicit messages `WRONG PASSWORD`, `NOT PERMITTED` and `AUTHENTICATION FAILED`, all with exit 252.
+   - When `sudo -n -v` shows the target kept the timestamp, the exact command runs with `sudo -n --`, so sudoers rules and logs see the real command.
+   - Some targets don't carry the timestamp between separate sudo invocations, for example with `timestamp_timeout=0`. Before this fallback, `-v` succeeded but `sudo -n` failed with "a password is required" and exit 1. Now the command is authenticated inline with `sudo -k -S -- /bin/sh -c 'exec "$@" </dev/null' psudo cmd…`, after first checking with `sudo -l` that sudoers allows it (`noshell` otherwise).
+4. **Fixed executables.** `sudo`, `ssh`, `secret-tool` and the dialog programs come from fixed system directories, never from `PATH`. The local shell gets a minimal environment, and `ssh` loses `LD_*`, `DYLD_*` and `SSH_ASKPASS*`.
+5. **Host validation.** Hosts that are empty, start with `-` or contain whitespace or control characters exit 2, and `ssh` always gets `--` before the host.
+6. **Pre-flight.** `ssh -T -o BatchMode=yes -- host true` runs before the dialog, so an unreachable host exits 255 without asking for a sudo password.
+   - **Interactive SSH login (departs from §2, "SSH password authentication").** When the key-only pre-flight fails, psudo logs in itself: `ssh -o ControlMaster=yes -o ControlPath=<dir>/%C -o ControlPersist=1800 -o NumberOfPasswordPrompts=1 -- host true`, with `SSH_ASKPASS` set to psudo and `SSH_ASKPASS_REQUIRE=force`.
+   - In that mode (`PSUDO_SSH_ASKPASS_HOST` set), psudo shows each of ssh's prompts in an "SSH login" dialog with the host, and writes the answer to ssh's pipe. Confirmation prompts, such as an unknown host key, are refused.
+   - The command itself still runs with `BatchMode=yes` over that connection (`ControlMaster=no`), so the sudo password's path is unchanged. Before anything else, psudo checks `ssh -O check` for a connection it already keeps, which is how a TOTP host prompts once per 30 idle minutes and not on every command.
+   - `<dir>` is `/tmp/psudo-<uid>` (Linux: `$XDG_RUNTIME_DIR/psudo`), mode 0700 and owned by the user, or sharing is off. `--ssh-logout` closes every kept connection.
+   - This works for any login method ssh can prompt for (password, keyboard-interactive codes, key passphrases), without per-host configuration.
+7. **Dialog timeout.** 90 seconds, below Claude Code's 120-second default command timeout.
+8. **Codex** gets psudo through its SessionStart context instead of a deny hook, matching the previous Codex integration, which installed no permission hooks.
+9. **Exit code 2** is used for usage errors, which the draft did not cover. Exit 250 also covers an invalid cache config file or an unavailable credential store (fail closed).
+
+Additional limitations:
+
+- The remote login shell must be POSIX-compatible (sh, bash, dash, zsh, ksh). Its startup files run with the SSH channel's stdin.
+- On a target that keeps no sudo timestamp, the command runs through `/bin/sh` under sudo. sudoers must allow `/bin/sh` there, and sudo's logs show the shell wrapper.
+- Commands that need a terminal (for example a tool that reads a secret with the echo off) or their own stdin cannot run through psudo.
+- psudo accepts no sudo options. Use `psudo runuser -u <user> -- …` or `psudo sh -c '…'`.
+- A model that can write the user's files can tamper with the installed binary or with the remote user's shell startup files. psudo keeps the password out of the model's context and off command lines. It is not a defence against a hostile process running as the same user.

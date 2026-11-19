@@ -1,57 +1,93 @@
 # Claude Code
 
-Claude Code integration for [harness-root-hook](../README.md), with graphical
-sudo authentication and a fixed two-hour password cache. For Codex, use the separate
-[`codex/` integration](../codex/README.md).
+Part of [harness-root-hook](../README.md). For Codex, see the [Codex guide](../codex/README.md).
 
-## Choose your operating system
-
-| Platform | Dialog | Cache | Guide |
-| --- | --- | --- | --- |
-| Linux | zenity, kdialog, or ssh-askpass | Desktop Secret Service | [Linux](linux/README.md) |
-| macOS | Native osascript dialog | Login Keychain with launchd expiry task | [macOS](macos/README.md) |
-
-Run the appropriate installer from the repository root:
+## Install
 
 ```sh
-# Linux
-./claude-code/linux/install.sh
-
-# macOS
-./claude-code/macos/install.sh
+psudo --install=claude-code      # from a release archive: ./psudo --install=claude-code
+# or from a source checkout:
+make install-claude-code
 ```
 
-Both require Python 3.9+, `jq`, and a logged-in desktop session. Linux additionally
-requires `secret-tool` and an active Secret Service provider. They install into
-`~/.claude/hooks/` and register a PreToolUse Bash hook in
-`~/.claude/settings.json`. Restart Claude Code after installation.
+The installer:
 
-The hook rewrites sudo commands to authenticate through `SUDO_ASKPASS`.
-Both harnesses read `~/.config/harness-root-hook/config.json`. The default
-`cache.ttl_seconds` is 7200 (two hours), with a fixed deadline from successful
-authentication. See [password caching](../CACHE.md) for configuration and storage.
+- copies the binary to `~/.claude/hooks/psudo`;
+- registers `"$HOME"/.claude/hooks/psudo --hook=claude-code` as a `PreToolUse`
+  hook for `Bash` in `~/.claude/settings.json`. Other settings and hooks are
+  kept in order, and the first run backs the file up to `settings.json.bak`;
+- registers `--hook=claude-code-session-start` as a `SessionStart` hook. It
+  tells each session about psudo from the start, including `psudo -H` for
+  remote hosts. The guard alone only reacts to commands that contain `sudo`.
+  Without this hook, a session asked for root on a host ran `ssh root@host`
+  and never used psudo;
+- creates `~/.config/harness-root-hook/config.json` if it is missing;
+- on macOS, registers the `com.harness-root-hook.claude-code.reaper` launchd
+  task, which deletes expired Keychain entries every five minutes without
+  reading the password;
+- removes the previous shell/Python integration (`sudo-check.sh`, `askpass.sh`,
+  `reaper.sh`, `harness_cache.py`) and its old cache entries. A cache entry
+  created by the previous version keeps working.
 
-## Existing installations
+Restart Claude Code afterwards. Linux needs `secret-tool`
+(`sudo apt install libsecret-tools zenity` on Ubuntu) and a running Secret Service
+provider.
 
-The source folders moved from `linux/` and `macos/` into this directory when the
-repository became `harness-root-hook`. Installed hook paths and Claude settings remain the same. Reinstall to obtain
-the shared cache implementation; the installer removes legacy cached credentials.
-See the [cache migration guide](../CACHE.md#upgrading-from-the-original-claude-code-cache).
-Installer scripts resolve their sources relative to their own location and
-can be called from any working directory.
+## What the hook does
+
+The hook **denies** any Bash command that contains `sudo` or `sshpass` as a
+standalone word, and tells the model:
+
+> Use `psudo <command>` (local) or `psudo -H <host> <command>` (remote). … Never ask for or handle the password.
+
+The model then calls `~/.claude/hooks/psudo …`. Claude Code's normal permission
+prompt still applies to that call. The hook is best effort. A command that gets
+past it still fails safely, because sudo without a terminal or password cannot
+authenticate.
+
+| Command | Decision |
+| --- | --- |
+| `sudo apt install x` | deny |
+| `ssh host sudo systemctl restart nginx` | deny |
+| `echo … \| sudo -S …` | deny |
+| `sshpass -p … ssh host` | deny |
+| `psudo apt install x` | allow |
+| `psudo -H host systemctl restart nginx` | allow |
+| `psudo ls && sudo rm x` | deny |
+| `cat /etc/sudoers` | allow |
+
+To avoid wasted turns, you can add one line to your `CLAUDE.md`: *"Privileged
+commands go through `~/.claude/hooks/psudo [-H host] cmd`; never request, echo or
+store a password."*
+
+## Verify
+
+Ask Claude Code to run each of these:
+
+1. `sudo id -u`: denied, with the psudo hint.
+2. `~/.claude/hooks/psudo id -u`: one dialog naming *this computer* and `id -u`, then `0`.
+   Run it again within two hours and no dialog appears.
+3. `~/.claude/hooks/psudo -H <your-ssh-alias> id -u`: a dialog naming the host, then `0`.
+   Every remote run prompts.
+4. Cancel a dialog: exit 251. Enter a wrong password: exit 252, and the command does not run.
+
+Neither `ps`, your shell history, nor the transcript should contain the password.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `sudo` still runs or fails with "a terminal is required" | Restart Claude Code; check `/hooks` lists `psudo --hook=claude-code`. |
+| Exit 250 | No desktop dialog (Linux: `DISPLAY`/`WAYLAND_DISPLAY` and zenity/kdialog), invalid `config.json`, or a locked or missing credential store. |
+| Exit 255 before any dialog | The host is unreachable, or the SSH login failed. Check `ssh <host> true` in a terminal. A host that needs a code or password gets an **SSH login** dialog; a wrong code or a cancel also exits 255. |
+| Exit 252 on a remote host that should work | The remote user must be allowed to use sudo, `requiretty` must be off, and the login shell must be POSIX. |
+| macOS: launchd task status | `launchctl print "gui/$(id -u)/com.harness-root-hook.claude-code.reaper"` |
 
 ## Uninstall
 
-From the repository root:
-
 ```sh
-# Linux
-./claude-code/linux/uninstall.sh
-
-# macOS
-./claude-code/macos/uninstall.sh
+~/.claude/hooks/psudo --uninstall=claude-code
 ```
 
-Restart Claude Code afterward. The corresponding uninstaller removes the
-installed hook and cached password; the macOS uninstaller also removes its
-launchd task. Codex uses separate installation files and settings.
+This removes the hook registration, the cached password, the launchd task and the
+binary. The shared `config.json` stays for Codex or a future install.
