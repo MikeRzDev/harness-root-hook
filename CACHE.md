@@ -1,9 +1,15 @@
 # Password caching
 
-Codex and Claude Code use the same cache implementation and JSON settings on
-Linux and macOS. After you enter a valid **sudo password** in the desktop dialog,
-the helper reuses it for **two hours** by default. This is normally your own
-account password, not a separate root password.
+Codex and Claude Code use the same cache implementation (built into `psudo`) and
+JSON settings on Linux and macOS. After you enter a valid **sudo password** in the
+desktop dialog for a command on this computer, psudo reuses it for **two hours**
+by default. This is normally your own account password, not a separate root
+password.
+
+**Only local commands are cached.** `psudo -H <host>` always shows the dialog,
+and remote passwords are never stored. While a local password is cached, no
+dialog appears, so the harness's own approval prompt is what shows you the
+command. Set `ttl_seconds` to `0` to see the dialog for every command.
 
 The window starts at successful authentication. Repeated commands **do not extend
 it**. At expiry, the next privileged command requests your password again. Each
@@ -67,11 +73,11 @@ There is **no plaintext fallback** when the OS credential store is missing or
 unavailable. Linux requires a working desktop D-Bus session. Missing dependency,
 locked-store failure, or storage failure stops the authentication attempt.
 
-A cached password is validated against sudo before reuse. Wrong or changed
-passwords are discarded. New passwords are checked before storing, with at most
-three desktop attempts. Cancellation aborts the privileged action. Generated
-sudo commands use `-k` so sudo's separate timestamp cache cannot bypass this
-integration's configured expiry.
+A password is stored only after sudo has accepted it. If sudo rejects a cached
+password, for example because you changed it, psudo deletes the entry and exits
+252 without retrying; the next command shows the dialog. Cancellation aborts the
+privileged action. psudo runs `sudo -k` before and after each command, so sudo's
+separate timestamp cache cannot bypass the configured expiry.
 
 Expired credentials are never reused. Linux removes expired entries on the next
 cache request, so an unused expired entry can remain encrypted in the keyring
@@ -86,10 +92,10 @@ These commands delete credentials without printing them:
 
 ```sh
 # Codex
-python3 "${CODEX_HOME:-$HOME/.codex}/root-hook/harness_cache.py" --harness codex clear
+"${CODEX_HOME:-$HOME/.codex}/root-hook/psudo" --clear-cache=codex
 
 # Claude Code
-python3 "$HOME/.claude/hooks/harness_cache.py" --harness claude-code clear
+"$HOME/.claude/hooks/psudo" --clear-cache=claude-code
 ```
 
 Uninstalling a harness integration clears its cache and removes its macOS cleanup
@@ -97,9 +103,16 @@ task. The shared JSON configuration is retained for the other harness and future
 installation. Uninstall while the credential store is available; a failed clear
 is reported instead of pretending the credential was removed.
 
+## Upgrading from the Python helper
+
+`psudo --install=…` keeps the same Keychain service and Secret Service attributes
+(`harness-root-hook.<harness>`) and record format, so a password cached by the
+previous Python helper stays valid until its original deadline. The installer
+removes `harness_cache.py` and the old shell hooks.
+
 ## Upgrading from the original Claude Code cache
 
-Run the new installer for your platform. The Linux installer deletes the old
+Run `psudo --install=claude-code`. The Linux installer deletes the old
 `claude-sudo.cache` plaintext file. The macOS installer removes the old
 `claude-sudo` Keychain item and `com.claude.sudo-reaper` task. New entries use
 `harness-root-hook` names, and the default changes from a sliding one-hour window
