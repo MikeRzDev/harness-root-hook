@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/vault"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/vault"
 )
 
 // Key identifies a request exactly: a remembered approval covers only the

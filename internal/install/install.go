@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/sysbin"
 )
 
 const (

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/secrets"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/secrets"
 )
 
 // Only error paths are exercised here; a valid command would open a real dialog.

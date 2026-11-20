@@ -1,6 +1,6 @@
 # Codex
 
-Part of [Power Sudo Harness Hook](../README.md). For Claude Code, see the [Claude Code guide](../claude-code/README.md).
+Part of [Harness Secrets Sudo Hook](../README.md). For Claude Code, see the [Claude Code guide](../claude-code/README.md).
 
 ## Install
 

@@ -1,4 +1,4 @@
-# Power Sudo Harness Hook (psudo): secure sudo credential prompt for agent harnesses
+# Harness Secrets Sudo Hook (psudo): secure sudo credential prompt for agent harnesses
 
 Status: implemented (v1), see "Implementation decisions" at the end
 Date: 2026-11-18
@@ -223,6 +223,7 @@ The implementation is the Go binary in `cmd/psudo`. It differs from or extends t
     - The word as text is allowed only for known data programs: cat, tee, echo, printf, grep/rg, git (not with -c), gh (not alias), and file tools such as ls, cp, mv, mkdir and jq. Every other program is judged on its full text, so an unknown program fails closed.
     - psudo's own arguments are trusted only when the command word resolves to the installed binary. A program merely named psudo is judged like any other.
     - A computed program name (`$cmd`) or a command it cannot parse falls back to the plain word match, so failure still denies.
+    - The project's own name, `harness-secrets-sudo-hook`, holds the word between dashes. The plain word match skips exactly that name, so a path into a checkout (`cd …/harness-secrets-sudo-hook`), `git clone` and `go install` of the repository are allowed. A command word called `sudo` is denied wherever it lives, also in a folder of that name.
     - It also denies `security` or `secret-tool` commands that name a `harness-root-hook` entry (§11.1), or that print a secret from any entry (see [secrets.md](secrets.md) §7.1). This holds behind a wrapper and its values (`timeout 5 security …`) and for the command given to psudo itself.
     - It remains best effort: §6.4's backstop still applies.
 

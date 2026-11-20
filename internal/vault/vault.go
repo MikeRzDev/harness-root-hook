@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/sysbin"
 )
 
 // Vault is one namespace ("secret", "approvals") of credential-store entries.

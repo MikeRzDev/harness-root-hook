@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/jsonedit"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/jsonedit"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/shquote"
 )
 
 // SuggestedRule is the rule psudo offers when a request names a secret that

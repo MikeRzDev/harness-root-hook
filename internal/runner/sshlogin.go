@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
 )
 
 // AskpassHostEnv is set, with the host as its value, only on the ssh process

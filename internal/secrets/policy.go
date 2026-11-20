@@ -16,10 +16,10 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/envfile"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/envfile"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/sysbin"
 )
 
 // MaxValue is the largest secret psudo stores.

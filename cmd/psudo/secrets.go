@@ -14,14 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/envfile"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/proc"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/secrets"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/vault"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/envfile"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/proc"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/secrets"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/vault"
 )
 
 // secretOption reports whether a is --secret or --secret-file, with or

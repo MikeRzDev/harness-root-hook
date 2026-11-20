@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
 )
 
 // fakeSecurity models security(1): items keyed by service, `-i` commands

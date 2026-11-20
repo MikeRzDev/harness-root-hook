@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/jsonedit"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/jsonedit"
 )
 
 // readSettings loads a hooks settings file. A missing file is an empty object.

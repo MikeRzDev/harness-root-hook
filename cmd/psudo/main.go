@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/guard"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/install"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/secrets"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/guard"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/install"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/prompt"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/secrets"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/sysbin"
 )
 
 // version is set by -ldflags in release builds. `go install module@vX` builds

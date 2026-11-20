@@ -46,6 +46,23 @@ func TestDecisionMatrix(t *testing.T) {
 		"ls /etc/sudoers.d":                     "allow",
 		"grep pseudo notes.txt":                 "allow",
 
+		// The project's own name holds the word between dashes. It is a name,
+		// not the command, so paths and links with it are allowed.
+		"cd /home/u/src/harness-secrets-sudo-hook && make test":                      "allow",
+		"git clone https://github.com/MikeRzDev/harness-secrets-sudo-hook.git":       "allow",
+		"go install github.com/MikeRzDev/harness-secrets-sudo-hook/cmd/psudo@latest": "allow",
+		"ls harness-secrets-sudo-hook/docs harness-secrets-sudo-hook/cmd":            "allow",
+		"sh -c 'cd harness-secrets-sudo-hook && make build'":                         "allow",
+		"cd harness-secrets-sudo-hook && sudo make install":                          "deny",
+		"sh -c 'cd harness-secrets-sudo-hook; sudo id'":                              "deny",
+		"harness-secrets-sudo-hook/sudo id":                                          "deny",
+		"env harness-secrets-sudo-hook/sudo id":                                      "deny",
+		"ls harness-secrets-sudo-hook sudo":                                          "deny",
+		"ls sudo-harness-secrets-sudo-hook":                                          "deny",
+		"ls harness-secrets-sudo-hook-sudo":                                          "deny",
+		"ls harness-secrets-sudo -hook":                                              "deny",
+		"ls my-sudo-notes":                                                           "deny",
+
 		// The word as data: these blocked real work before.
 		"cat >> specs/PROGRESS.md <<'EOF'\n13. Ran `sudo fleet-ca krl push` through psudo.\nEOF": "allow",
 		"cat > notes.md <<EOF\nsudo is denied; use psudo\nEOF":                                   "allow",

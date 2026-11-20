@@ -117,11 +117,20 @@ var (
 	caseWord    = regexp.MustCompile(`(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)`)
 )
 
+// ownName is this project's name. It holds the word sudo between dashes, and
+// every path into a checkout and every link to the repository holds the name
+// (cd …/harness-secrets-sudo-hook, git clone, go install). Read as text it
+// would deny all of those, so the plain-text rule skips exactly this name. It
+// is swapped for a single letter, so whatever stands next to it is judged as
+// before. A command word called sudo is denied wherever it lives, also inside
+// a folder of this name.
+const ownName = "harness-secrets-sudo-hook"
+
 // textVerdict is the plain-text rule, used for code the guard does not parse
 // (an argument of sh -c or ssh) and as the fail-closed fallback.
 func textVerdict(s string) verdict {
 	v := allow
-	if pattern.MatchString(s) {
+	if pattern.MatchString(strings.ReplaceAll(s, ownName, "x")) {
 		v = denyRoot
 	}
 	if cacheToolPat.MatchString(s) && (cachePattern.MatchString(s) || credReadPat.MatchString(s)) {

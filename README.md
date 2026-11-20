@@ -1,7 +1,7 @@
-# Power Sudo Harness Hook
+# Harness Secrets Sudo Hook
 
-**Let an AI coding agent run root commands, on your machine or over SSH, without
-ever seeing your password.**
+**Let an AI coding agent run root commands and use your secrets, on your machine
+or over SSH, without ever seeing your password or the secret.**
 
 AI coding agents such as **Claude Code** and **Codex** often need root: to install
 a package, restart a service, or fix a server. Plain `sudo` doesn't work for
@@ -14,15 +14,21 @@ agent writes the command; **you** type the password into a native desktop dialog
 that shows exactly which host and which command you are authorizing. The agent
 only gets the output and the exit code.
 
+The same command hands a **secret** (an API token, a database password) to a
+program that needs it. You type the value into a dialog, and psudo gives it to
+that program only. The agent never sees it; see
+[Stored secrets](#stored-secrets).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platforms: Linux and macOS](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)
 ![Harnesses: Codex and Claude Code](https://img.shields.io/badge/harness-Codex%20%7C%20Claude%20Code-green)
-[![GitHub stars](https://img.shields.io/github/stars/MikeRzDev/harness-psudo-hook?style=social)](https://github.com/MikeRzDev/harness-psudo-hook/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/MikeRzDev/harness-secrets-sudo-hook?style=social)](https://github.com/MikeRzDev/harness-secrets-sudo-hook/stargazers)
 
 ```sh
 psudo apt install nginx                        # root on this computer
 psudo -H web1 systemctl restart nginx          # root on web1, over SSH
 psudo -H admin@db.example.com sh -c 'journalctl -u postgres | tail -50'
+psudo --secret STRIPE_API_KEY=stripe-api-key -- ./charge-report   # a secret; runs as you, not root
 ```
 
 `psudo` is a single static Go binary with no runtime dependencies.
@@ -86,7 +92,9 @@ It denies `sudo` or `sshpass` where they would actually run: as a command, after
 `find -exec`, or inside code given to `sh -c`, `ssh`, `python3 -c` and the like.
 The word as plain text is fine for data tools (`cat`, `tee`, `echo`, `grep`,
 `git commit -m`, …), so writing notes or commit messages that mention sudo isn't
-blocked. If it can't tell, it denies. It is best effort by design. The real
+blocked. This project's own name, `harness-secrets-sudo-hook`, is fine anywhere,
+so a path into a checkout or a link to the repository isn't blocked either. If
+it can't tell, it denies. It is best effort by design. The real
 backstop is that sudo without a terminal and without your password fails on its
 own.
 
@@ -128,7 +136,7 @@ The installer copies psudo into the harness's hook folder, so after
 ### Go
 
 ```sh
-go install github.com/MikeRzDev/harness-psudo-hook/cmd/psudo@latest
+go install github.com/MikeRzDev/harness-secrets-sudo-hook/cmd/psudo@latest
 "$(go env GOPATH)"/bin/psudo --install=claude-code     # and/or --install=codex
 ```
 
@@ -138,7 +146,7 @@ Pin a version with `@v0.1.0` instead of `@latest`. Go builds it from source
 ### From a release
 
 Download the archive for your platform from
-[Releases](https://github.com/MikeRzDev/harness-psudo-hook/releases), check it
+[Releases](https://github.com/MikeRzDev/harness-secrets-sudo-hook/releases), check it
 against `SHA256SUMS`, and run the installer for your harness:
 
 ```sh
@@ -156,8 +164,8 @@ run `xattr -d com.apple.quarantine psudo` first.
 Requires Go 1.22+.
 
 ```sh
-git clone https://github.com/MikeRzDev/harness-psudo-hook.git
-cd harness-psudo-hook
+git clone https://github.com/MikeRzDev/harness-secrets-sudo-hook.git
+cd harness-secrets-sudo-hook
 make install-claude-code     # and/or: make install-codex
 ```
 
@@ -383,9 +391,13 @@ make release VERSION=v1.2.3   # GitHub release from dist/ + Homebrew tap update;
 The local and remote transports run through the same test suite. It checks that
 the password never appears in output, argv or environment, and that every exit
 code and hook decision matches the spec. The full design is in
-[docs/psudo.md](docs/psudo.md). Names on disk (the config directory,
-credential-store entries, launchd task, `HARNESS_ROOT_HOOK_CONFIG`) keep the
-project's earlier name, `harness-root-hook`, so existing installs keep working.
+[docs/psudo.md](docs/psudo.md).
+
+**Earlier names.** The project was called `harness-root-hook` and then
+`harness-psudo-hook` (Power Sudo Harness Hook). The command is still `psudo`.
+Names on disk (the config directory, credential-store entries, launchd task,
+`HARNESS_ROOT_HOOK_CONFIG`) keep `harness-root-hook`, so existing installs keep
+working.
 
 ## License
 

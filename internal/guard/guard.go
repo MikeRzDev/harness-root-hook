@@ -8,7 +8,7 @@ import (
 	"io"
 	"regexp"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/shquote"
 )
 
 // pattern matches sudo or sshpass as standalone words, like grep -w.

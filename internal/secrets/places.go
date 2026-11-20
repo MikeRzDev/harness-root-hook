@@ -9,10 +9,10 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/envfile"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/proc"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/shquote"
-	"github.com/MikeRzDev/harness-psudo-hook/internal/vault"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/envfile"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/proc"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/shquote"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/vault"
 )
 
 // Place is somewhere the value of a secret is kept (docs/secrets.md §6). A

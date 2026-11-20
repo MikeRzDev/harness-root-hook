@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-secrets-sudo-hook/internal/cache"
 )
 
 const evil = `rm -rf "/tmp/x" ; echo '$(id)' <b>bold</b> & "quote" \" end tell`
