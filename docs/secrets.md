@@ -186,6 +186,15 @@ After the value is entered, a dialog titled `Keep the secret?` asks where to kee
 
 When the rules are new or changed, a dialog titled `Secret rules changed` lists every secret with its commands, hosts and asking behaviour (`these programs get it without a dialog`, `asks before each use`, `asks before each use, can remember for N min`). Its buttons are `Deny` and `Approve rules`. This dialog stays even though it does not ask for a value: the agent can edit the rules file, and without it could give any stored secret to a program of its own.
 
+### 5.6 The program stays the one the user allowed
+
+A rule names a program, and psudo does not ask before each use. That is only worth something while the program is the file the user allowed. Often the agent can change it: a script in the project, a tool under `~/bin`, anything Homebrew installed (those folders belong to the user).
+
+- **Pin.** For a local program that the user's own account can change (the file or a folder above it belongs to the user, or is writable by group or others), psudo remembers the SHA-256 of the file the first time a stored secret is given to it. The pins are kept in the credential store, next to the approved rules. When the file is a different one later (edited, replaced, a link pointed elsewhere, or another file of that name found earlier in the trusted directories), a dialog titled `Program changed` shows the path and the request, with `Deny` (default) and `Allow this version`. A pin belongs to the entry of the rule's `commands` that allowed the program, not to the path it resolved to. A program only root can change is not pinned.
+- **Limits.** The first use is trusted as it is; the pin catches changes after it. The file is read right before the program starts, and the moment in between is not covered. Only the program file is pinned, not what it loads: libraries, modules, config files, or the scripts an interpreter is given. On an SSH host psudo cannot inspect files, so nothing is pinned there.
+- **Interpreters.** `python3`, `node`, `perl`, `ruby`, `awk` and similar run whatever code they are given, so naming one in a rule says nothing about what happens to the secret. A rule psudo suggests for an interpreter has `"confirm": true`: it asks before each use and shows the whole command. A rule the user writes may leave that out; then the secret is in effect the agent's.
+- **Forbidden programs under another name.** The check ignores case (`/bin/SH` is `/bin/sh` on a file system that ignores case) and also refuses a file that is the same file as a forbidden program (a hard link).
+
 ## 6. Storage
 
 ### 6.1 Where a value is kept
@@ -250,7 +259,8 @@ The SessionStart context tells the model: use `psudo --secret VAR=name -- <comma
 ### 7.3 What the rules do not stop
 
 - An allowed program that runs code it finds in the folder or in its own config: git hooks and `core.sshCommand`, `.npmrc`, Makefiles, `psql`'s `\!`. The dialog in which the rule is made shows the folder and the command, but psudo does not ask before each later use. Set `"confirm": true` in the rule for these tools.
-- Interpreters the user allows explicitly (`python3`, `node`). They can print their environment.
+- Interpreters the user allows with `"confirm": false` (`python3`, `node`). They can print their environment. psudo's own rules for them ask before each use (§5.6).
+- What an allowed program loads besides its own file: modules, plugins, config. The pin in §5.6 covers the program file only.
 
 ### 7.4 Redaction
 
@@ -267,6 +277,7 @@ psudo replaces each secret in the command's stdout and stderr with `[REDACTED:<n
 | Config invalid | 253, `invalid secrets rules in config.json` |
 | Rules changed and the user denies them | 251 |
 | User clicks Deny, or the dialog times out | 251 |
+| The program file changed since the user allowed it | the Program changed dialog; Deny is 251 |
 | Keychain locked or Secret Service missing | 254 |
 | The host does not start psudo's script (forced command, non-POSIX login shell) | 254, no secret was sent |
 | Remote decoding fails | 254, the command did not run |
@@ -292,6 +303,9 @@ psudo replaces each secret in the command's stdout and stderr with `[REDACTED:<n
 - Only an env file that git ignores is read or written; a tracked file, an unignored file and a symbolic link are not. A value in an env file never replaces one in the credential store.
 - Without a session psudo can identify, the default keeps the value for one command only.
 - With `HOME` set by the caller, psudo still reads and writes the user's own keychain, and no system dialog about a missing keychain appears.
+- A program whose file changed after the user allowed it is asked about again, and refusing runs nothing; so is another file of the same name found first. An unchanged program is not asked about.
+- A rule psudo suggests for an interpreter asks before each use.
+- `/bin/SH`, and a hard link to a forbidden program under another name, are refused.
 - A secret is refused in a variable its rule does not name; a rule psudo adds names the variable of the request.
 - A value from the env file together with a stored secret, or with one about to be entered, is refused before any dialog.
 - A forbidden program is refused on an SSH host as well, including through a suggested rule.

@@ -308,6 +308,7 @@ type fixture struct {
 	session   Session
 	noSession bool
 	project   Place // the project's git-ignored env file, when it has one
+	find      func(string) string
 }
 
 // entry is the name under which the fixture's session keeps a secret.
@@ -389,7 +390,12 @@ func (f *fixture) runner() *Runner {
 			f.answer = f.answer[1:]
 			return a, nil
 		},
-		Find: func(string) string { return "" },
+		Find: func(name string) string {
+			if f.find != nil {
+				return f.find(name)
+			}
+			return ""
+		},
 		Environ: []string{"HOME=/h", "USER=mallory", "NODE_OPTIONS=--require=evil", "LD_PRELOAD=x", "LC_ALL=C",
 			"XDG_CONFIG_HOME=/x", "XDG_RUNTIME_DIR=/x", "TOKEN=caller"},
 		TempRoot: f.dir,
@@ -776,6 +782,151 @@ func TestEnvFileValuesNeverShareACommandWithAStoredSecret(t *testing.T) {
 		if strings.Contains(f.stdout.String(), "raw:") || f.policy != before {
 			t.Fatal("the command ran, or a rule was written")
 		}
+	}
+}
+
+// A rule names a program and psudo does not ask before each use. So the
+// program has to stay the one the user allowed: when its file changes, the
+// user is asked again, and refusing runs nothing.
+func TestAChangedProgramIsAskedAboutAgain(t *testing.T) {
+	f := newFixture(t)
+	f.policy = `{"secrets":{"tok":{"commands":["` + f.tool + `"],"vars":["TOKEN"]}}}`
+	f.answer = []int{1} // the rules, once
+	if code := f.run(tokReq(f)); code != 7 {
+		t.Fatalf("first: %d %s", code, f.stderr.String())
+	}
+	if code := f.run(tokReq(f)); code != 7 || len(f.chosen)+len(f.asked) != 0 {
+		t.Fatalf("unchanged program: %d dialogs %d", code, len(f.chosen)+len(f.asked))
+	}
+	// The agent edits the program it may run with the secret.
+	os.WriteFile(f.tool, []byte(toolScript+"# ...and now it also sends the token somewhere\n"), 0o755)
+	f.answer = nil
+	if code := f.run(tokReq(f)); code != runner.ExitCancelled || len(f.chosen) != 1 ||
+		f.chosen[0].Title != "Program changed (Claude Code)" || f.chosen[0].Buttons[0] != "Deny" ||
+		!strings.Contains(f.chosen[0].Text, mustReal(t, f.tool)) || strings.Contains(f.stdout.String(), "raw:") {
+		t.Fatalf("changed program: %d %+v %s", code, f.chosen, f.stdout.String())
+	}
+	// Refusing does not accept the new file: the next use asks again.
+	f.answer = []int{1}
+	if code := f.run(tokReq(f)); code != 7 || len(f.chosen) != 1 || f.chosen[0].Buttons[1] != "Allow this version" {
+		t.Fatalf("allowing the new version: %d %+v", code, f.chosen)
+	}
+	if code := f.run(tokReq(f)); code != 7 || len(f.chosen)+len(f.asked) != 0 {
+		t.Fatalf("after allowing: %d dialogs %d", code, len(f.chosen)+len(f.asked))
+	}
+}
+
+// The pin belongs to the rule's entry, not to a path: when another file of
+// that name is found first, it is a changed program, not a new one.
+func TestAnotherFileOfThatNameIsAChangedProgram(t *testing.T) {
+	f := newFixture(t)
+	first, planted := filepath.Join(f.dir, "a", "mytool"), filepath.Join(f.dir, "b", "mytool")
+	os.MkdirAll(filepath.Dir(first), 0o755)
+	os.MkdirAll(filepath.Dir(planted), 0o755)
+	os.WriteFile(first, []byte(toolScript), 0o755)
+	os.WriteFile(planted, []byte(toolScript+"# a different program\n"), 0o755)
+	found := first
+	f.find = func(name string) string {
+		if name == "mytool" {
+			return found
+		}
+		return ""
+	}
+	f.policy = `{"secrets":{"tok":{"commands":["mytool"],"vars":["TOKEN"]}}}`
+	req := Request{Uses: []Use{{Var: "TOKEN", Name: "tok"}}, Argv: []string{"mytool"}}
+	f.answer = []int{1}
+	if code := f.run(req); code != 7 {
+		t.Fatalf("first: %d %s", code, f.stderr.String())
+	}
+	found = planted
+	f.answer = nil
+	if code := f.run(req); code != runner.ExitCancelled || len(f.chosen) != 1 || !strings.Contains(f.chosen[0].Title, "Program changed") ||
+		!strings.Contains(f.chosen[0].Text, mustReal(t, planted)) {
+		t.Fatalf("planted program: %d %+v", code, f.chosen)
+	}
+}
+
+// An interpreter runs whatever code it is given, so a rule for one says
+// nothing about what happens to the secret: the rule psudo suggests asks
+// before each use and shows the command.
+func TestARuleForAnInterpreterAsksBeforeEachUse(t *testing.T) {
+	for name, want := range map[string]bool{"python3": true, "/usr/bin/perl": true, "node": true, "Node": true, "ruby3.3": true,
+		"gawk": true, "gh": false, "kubectl": false, "git": false, "psql": false, "/opt/tools/deploy": false} {
+		if RunsCode(name) != want {
+			t.Errorf("RunsCode(%q) != %v", name, want)
+		}
+	}
+	f := newFixture(t)
+	f.policy = `{}`
+	py := filepath.Join(f.dir, "python3")
+	os.WriteFile(py, []byte(toolScript), 0o755)
+	req := Request{Uses: []Use{{Var: "TOKEN", Name: "fresh"}}, Argv: []string{py, "-c", "print(1)"}}
+	f.typed = []string{"value"}
+	if code := f.run(req); code != 7 || !strings.Contains(f.asked[0].Text, "asks before each use") {
+		t.Fatalf("first: %d %+v %s", code, f.asked, f.stderr.String())
+	}
+	if p, err := ParsePolicy([]byte(f.policy)); err != nil || !p["fresh"].Confirm || !strings.Contains(f.policy, `"confirm": true`) {
+		t.Fatalf("rule %+v %v\n%s", p["fresh"], err, f.policy)
+	}
+	f.answer = nil
+	if code := f.run(req); code != runner.ExitCancelled || len(f.chosen) != 1 || f.chosen[0].Buttons[1] != "Allow once" ||
+		!strings.Contains(f.chosen[0].Text, "print(1)") {
+		t.Fatalf("second use: %d %+v", code, f.chosen)
+	}
+}
+
+// A forbidden program stays forbidden under another spelling or another name
+// for the same file.
+func TestForbiddenProgramsUnderAnotherName(t *testing.T) {
+	none := func(string) string { return "" }
+	uses := []Use{{Var: "T", Name: "a"}}
+	if _, err := ParsePolicy([]byte(`{"secrets":{"a":{"commands":["/bin/SH"],"vars":["T"]}}}`)); !errors.Is(err, ErrConfig) {
+		t.Errorf("a rule for /bin/SH was accepted: %v", err)
+	}
+	var ref *Refusal
+	for _, argv0 := range []string{"/bin/SH", "/usr/bin/Env", "BASH"} {
+		req := Request{Uses: uses, Argv: []string{argv0, "-c", "echo $T"}}
+		if _, err := Check(Policy{"a": SuggestedRule(req, "a")}, req, none); !errors.As(err, &ref) {
+			t.Errorf("%s: %v", argv0, err)
+		}
+	}
+	// The same file as a forbidden program, under an innocent name.
+	dir := t.TempDir()
+	shell, alias, other := filepath.Join(dir, "the-shell"), filepath.Join(dir, "innocent-tool"), filepath.Join(dir, "other-tool")
+	os.WriteFile(shell, []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(other, []byte("#!/bin/sh\n"), 0o755)
+	if err := os.Link(shell, alias); err != nil {
+		t.Skip("hard links are not available here:", err)
+	}
+	find := func(name string) string {
+		if name == "sh" {
+			return shell
+		}
+		return ""
+	}
+	for file, refused := range map[string]bool{alias: true, other: false} {
+		req := Request{Uses: uses, Argv: []string{file}}
+		_, err := Check(Policy{"a": SuggestedRule(req, "a")}, req, find)
+		if errors.As(err, &ref) != refused {
+			t.Errorf("%s: refused %v, want %v (%v)", filepath.Base(file), !refused, refused, err)
+		}
+	}
+}
+
+// A program is pinned when the user's own account could change it.
+func TestReplaceable(t *testing.T) {
+	mine := filepath.Join(t.TempDir(), "tool")
+	os.WriteFile(mine, []byte("x"), 0o755)
+	if !replaceable(mine) || !replaceable(filepath.Join(t.TempDir(), "missing")) {
+		t.Error("a file of the user, or one that does not exist, counts as fixed")
+	}
+	if os.Getuid() != 0 && replaceable("/bin/ls") {
+		t.Error("/bin/ls counts as something the user can change")
+	}
+	a, _ := fileSum(mine)
+	os.WriteFile(mine, []byte("y"), 0o755)
+	if b, err := fileSum(mine); err != nil || a == b || len(a) != 64 {
+		t.Errorf("sums %q %q %v", a, b, err)
 	}
 }
 

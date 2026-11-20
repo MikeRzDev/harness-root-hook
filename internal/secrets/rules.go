@@ -19,7 +19,10 @@ import (
 // The rule also names the variables the request puts the secret called name
 // in, so that later requests cannot move it to another variable.
 func SuggestedRule(req Request, name string) Rule {
-	r := Rule{Commands: []string{req.Argv[0]}, Local: req.Host == ""}
+	// An interpreter runs whatever code it is given, so naming it in a rule
+	// says nothing about what happens to the secret. For one, the suggested
+	// rule asks before each use, and the dialog shows the whole command.
+	r := Rule{Commands: []string{req.Argv[0]}, Local: req.Host == "", Confirm: RunsCode(req.Argv[0])}
 	if req.Host != "" {
 		r.SSHHosts = []string{req.Host}
 	}
@@ -84,6 +87,9 @@ func AddRules(path string, rules map[string]Rule) error {
 			}
 			entry.Set("ssh_hosts", hosts)
 		}
+		if r.Confirm {
+			entry.Set("confirm", true)
+		}
 		secrets.Set(name, entry)
 	}
 	root.Set("secrets", secrets)
@@ -133,7 +139,12 @@ func ruleNote(path, name string, r Rule) string {
 	if path == "" {
 		path = "config.json"
 	}
-	return "This also adds a rule to " + shquote.VisibleLine(path) + ": " + strings.Join(r.Commands, ", ") +
-		" may use \"" + name + "\" as " + strings.Join(r.Vars, ", ") + " " + where +
-		". From then on psudo gives it the secret without asking again; any other program or variable is refused."
+	note := "This also adds a rule to " + shquote.VisibleLine(path) + ": " + strings.Join(r.Commands, ", ") +
+		" may use \"" + name + "\" as " + strings.Join(r.Vars, ", ") + " " + where + ". "
+	if r.Confirm {
+		return note + "This program runs whatever code it is given, so psudo asks before each use and shows the command. " +
+			"Any other program or variable is refused."
+	}
+	return note + "From then on psudo gives it the secret without asking again, as long as the program file stays the same; " +
+		"any other program or variable is refused."
 }

@@ -311,9 +311,70 @@ func (r *Runner) Run(ctx context.Context, req Request) int {
 	defer stdout.Flush()
 	defer stderr.Flush()
 	if req.Host == "" {
+		// Last of all, right before the program starts: is it still the
+		// program the user allowed?
+		if code, ok := r.pinProgram(ctx, approvals, req, decision, st, fromProject); !ok {
+			return code
+		}
 		return r.local(ctx, req, decision.Path, values, stdout, stderr)
 	}
 	return r.remote(ctx, req, values, stdout, stderr)
+}
+
+// pinProgram checks that the program about to receive stored secrets is the
+// file it was when the user allowed it (see pins.go), and asks when it is
+// not. The first use of a program is remembered without a question.
+func (r *Runner) pinProgram(ctx context.Context, a *Approvals, req Request, d Decision, st *stores, fromProject func(string) bool) (int, bool) {
+	var names []string
+	for _, n := range Names(req.Uses) {
+		if !fromProject(n) { // a value from the env file is nothing the agent could not read
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 || !replaceable(d.Path) {
+		return 0, true
+	}
+	sum, err := fileSum(d.Path)
+	if err != nil {
+		r.fail("could not read %s to check that it is the program you allowed (%v). The command was not run.", d.Path, err)
+		return ExitStore, false
+	}
+	pins, err := a.Pins()
+	if err != nil {
+		r.fail("could not read the OS credential store. The command was not run.")
+		return ExitStore, false
+	}
+	update := map[string]string{}
+	var changed []string
+	for _, n := range names {
+		key := pinKey(n, d.Entry[n])
+		old, known := pins[key]
+		if known && old == sum {
+			continue
+		}
+		update[key] = sum
+		if known {
+			changed = append(changed, "\""+n+"\"")
+		}
+	}
+	if len(changed) > 0 {
+		_, code, ok := r.ask(ctx, prompt.Choice{Title: r.retitle("Program changed"),
+			Text: "The program that may use " + strings.Join(changed, ", ") + " is not the file it was when you allowed it:\n" +
+				shquote.VisibleLine(d.Path) + "\n\nThat is normal after the program was updated. It also happens when " +
+				"someone, the agent included, has edited or replaced it.\n\n" + message(req, st.from),
+			Buttons: []string{"Deny", "Allow this version"}},
+			"the program has changed since the user allowed it, and the user did not allow the new version (or the dialog timed out).")
+		if !ok {
+			return code, false
+		}
+	}
+	if len(update) > 0 {
+		if err := a.SetPins(update); err != nil {
+			r.fail("could not remember the program in the OS credential store. The command was not run.")
+			return ExitStore, false
+		}
+	}
+	return 0, true
 }
 
 func (r *Runner) retitle(what string) string {

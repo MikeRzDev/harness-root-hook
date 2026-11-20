@@ -242,7 +242,7 @@ func (r Rule) Validate() error {
 		if len(c) > maxCommandLen || !plain(c) {
 			return fmt.Errorf("command %q must be plain text on one line (at most %d bytes)", c, maxCommandLen)
 		}
-		if forbidden[filepath.Base(c)] {
+		if forbiddenName(filepath.Base(c)) {
 			return fmt.Errorf("%q cannot receive secrets: it can print them or run other programs", c)
 		}
 	}
@@ -309,6 +309,46 @@ type Decision struct {
 	Path     string // the program to run locally; "" on a remote host
 	Confirm  bool
 	Remember int // seconds; 0 offers only "Allow once"
+	// Entry is, for each secret, the entry of its rule's commands that
+	// allowed the program. The program a user allowed is remembered under
+	// that entry (see pins.go), not under the path it resolves to today.
+	Entry map[string]string
+}
+
+// forbiddenName reports whether a program name is one that can never receive
+// a secret. Case does not count: on a file system that ignores case, as macOS
+// has by default, /bin/SH is /bin/sh.
+func forbiddenName(name string) bool { return forbidden[strings.ToLower(name)] }
+
+// forbiddenFile reports whether file is one of the forbidden programs under
+// another name: the same file as one of them (a hard link, or a path that
+// differs only in case), found through find.
+func forbiddenFile(file string, find func(string) string) bool {
+	info, err := os.Stat(file)
+	if err != nil {
+		return false
+	}
+	for name := range forbidden {
+		if p := find(name); p != "" {
+			if other, err := os.Stat(p); err == nil && os.SameFile(info, other) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runsCode matches programs whose job is to run code they are given, in an
+// argument or a file: interpreters. A rule cannot say what such a program
+// will do with a secret, so a rule psudo suggests for one asks before each
+// use ("confirm": true), with the whole command in the dialog.
+var runsCode = regexp.MustCompile(`^(python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[0-9.]*|node|nodejs|deno|bun|tsx|ts-node|` +
+	`php[0-9.]*|[gmn]?awk|lua[0-9.]*|luajit|tclsh[0-9.]*|wish|rscript|pwsh|powershell|swift|groovy|jshell|jrunscript|irb|` +
+	`java|scala|kotlin|elixir|erl|ghci|runghc|runhaskell|racket|guile|julia|octave|sbcl|clojure|bb)$`)
+
+// RunsCode reports whether the program is an interpreter.
+func RunsCode(program string) bool {
+	return runsCode.MatchString(strings.ToLower(filepath.Base(program)))
 }
 
 // Refusal explains why a request is not allowed. It names what the user
@@ -358,10 +398,10 @@ func Check(p Policy, req Request, find func(string) string) (Decision, error) {
 	argv0 := req.Argv[0]
 	// On an SSH host the name is all psudo has to go on; locally the resolved
 	// file is checked as well, below.
-	if argv0 == "" || forbidden[filepath.Base(argv0)] {
+	if argv0 == "" || forbiddenName(filepath.Base(argv0)) {
 		return Decision{}, refuse("%q can never receive secrets", argv0)
 	}
-	d := Decision{Remember: MaxRemember}
+	d := Decision{Remember: MaxRemember, Entry: map[string]string{}}
 	if req.Host == "" {
 		switch {
 		case strings.Contains(argv0, "/") && !filepath.IsAbs(argv0):
@@ -382,7 +422,7 @@ func Check(p Policy, req Request, find func(string) string) (Decision, error) {
 			return Decision{}, refuse("%q could not be resolved: %v", argv0, err)
 		}
 		d.Path = real
-		if forbidden[filepath.Base(real)] {
+		if forbiddenName(filepath.Base(real)) || forbiddenFile(real, find) {
 			return Decision{}, refuse("%q can never receive secrets", argv0)
 		}
 	}
@@ -398,9 +438,11 @@ func Check(p Policy, req Request, find func(string) string) (Decision, error) {
 		if req.Host != "" && !slices.Contains(rule.SSHHosts, req.Host) {
 			return Decision{}, refuse("secret %q may not be used on %s (not in its rule's ssh_hosts)", u.Name, req.Host)
 		}
-		if !commandAllowed(rule.Commands, req.Host, argv0, d.Path, find) {
+		entry, ok := commandAllowed(rule.Commands, req.Host, argv0, d.Path, find)
+		if !ok {
 			return Decision{}, refuse("secret %q may not be used with %q (not in its rule's commands)", u.Name, argv0)
 		}
+		d.Entry[u.Name] = entry
 		if !rule.allowsVar(u.Name, u.Var) {
 			if len(rule.Vars) > 0 {
 				return Decision{}, refuse("secret %q may not be put in %s (its rule's vars allow: %s)", u.Name, u.Var,
@@ -422,25 +464,27 @@ func Check(p Policy, req Request, find func(string) string) (Decision, error) {
 	return d, nil
 }
 
-func commandAllowed(entries []string, host, argv0, path string, find func(string) string) bool {
+// commandAllowed returns the entry of a rule's commands that allows the
+// program, if there is one.
+func commandAllowed(entries []string, host, argv0, path string, find func(string) string) (string, bool) {
 	for _, e := range entries {
 		bare := !strings.Contains(e, "/")
 		if host != "" {
 			// Remote: the name as given must match the entry exactly.
 			if bare && argv0 == e || !bare && filepath.IsAbs(e) && filepath.Clean(argv0) == filepath.Clean(e) {
-				return true
+				return e, true
 			}
 			continue
 		}
 		if bare {
 			if f := find(e); f != "" && same(f, path) {
-				return true
+				return e, true
 			}
 		} else if same(expand(e), path) {
-			return true
+			return e, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // Names returns the secret names in uses, sorted and unique.
