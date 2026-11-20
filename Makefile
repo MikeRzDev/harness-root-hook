@@ -1,4 +1,5 @@
-# psudo build and release. Nothing here runs automatically: there is no CI.
+# harness-secrets-sudo-hook build and release. Nothing here runs automatically:
+# there is no CI. The command it builds is psudo.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
@@ -26,8 +27,9 @@ dist: test
 	cd dist && shasum -a 256 *.tar.gz > SHA256SUMS
 
 TAP_REPO := MikeRzDev/homebrew-tap
-# The Homebrew formula carries the project's name; the command is psudo.
-FORMULA := harness-secrets-sudo-hook
+# Releases and the Homebrew formula carry the project's name; the command is psudo.
+PROJECT := harness-secrets-sudo-hook
+FORMULA := $(PROJECT)
 
 # Publishes a GitHub release from local artifacts, then the Homebrew formula.
 # Run only on purpose, from a clean tree:
@@ -35,7 +37,7 @@ FORMULA := harness-secrets-sudo-hook
 release: dist formula
 	@git diff --quiet HEAD || { echo "release: working tree is dirty"; exit 1; }
 	@git rev-parse -q --verify "refs/tags/$(VERSION)" >/dev/null || { echo "release: tag $(VERSION) not found"; exit 1; }
-	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --verify-tag --title "psudo $(VERSION)" --generate-notes
+	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --verify-tag --title "$(PROJECT) $(VERSION)" --generate-notes
 	$(MAKE) tap VERSION=$(VERSION)
 
 formula:

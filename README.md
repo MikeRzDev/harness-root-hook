@@ -15,7 +15,7 @@ that shows exactly which host and which command you are authorizing. The agent
 only gets the output and the exit code.
 
 The same command hands a **secret** (an API token, a database password) to a
-program that needs it. You type the value into a dialog, and psudo gives it to
+program that needs it. You type the value into a dialog, and harness-secrets-sudo-hook gives it to
 that program only. The agent never sees it; see
 [Stored secrets](#stored-secrets).
 
@@ -46,7 +46,7 @@ can reach with `ssh`: a VPS, a Raspberry Pi, a homelab node, a jump host. Use
 aliases in `~/.ssh/config`. The password travels inside the SSH connection,
 never on a command line. Hosts that ask for more than a key at login (a one-time
 code, a password, a key passphrase) work too: ssh's question appears in a
-dialog, and psudo keeps the connection open briefly so you don't type the code
+dialog, and harness-secrets-sudo-hook keeps the connection open briefly so you don't type the code
 for every command.
 
 **Clear failures.** When something goes wrong, the agent gets one explicit line
@@ -62,12 +62,12 @@ can report the problem instead of trying workarounds.
 | Model context | Never. The agent only sees the command's output and exit code. |
 | Command lines and environment | Never. The password is not in any process's argv or environment, locally or on the remote host. |
 | In transit | Through a pipe to sudo on this computer, or through the encrypted SSH channel's stdin to sudo on the remote host. |
-| The command itself | It cannot read the password: its stdin is closed. psudo invalidates sudo's own timestamp first, so a cached sudo ticket can't make the password leak into the command. |
+| The command itself | It cannot read the password: its stdin is closed. harness-secrets-sudo-hook invalidates sudo's own timestamp first, so a cached sudo ticket can't make the password leak into the command. |
 | Disk | Never in a plaintext file. With the opt-in cache (off by default, see below), the OS credential store holds it. |
 | Wrong password | Reported as `WRONG PASSWORD`, never retried automatically, so you don't hit the host's lockout. |
 | SSH login codes | Typed into an **SSH login** dialog and passed straight to ssh. They are never stored. |
 
-**What psudo can't protect against.** psudo keeps the password away from the
+**What harness-secrets-sudo-hook can't protect against.** harness-secrets-sudo-hook keeps the password away from the
 model. It can't defend against a hostile program already running under your user
 account. Such a program could read the opt-in cache, or use a kept SSH
 connection, while those exist. Both are off or short-lived by default; see
@@ -77,14 +77,14 @@ connection, while those exist. Both are off or short-lived by default; see
 ## How it works in Claude Code and Codex
 
 The installer puts `psudo` where the harness can run it and registers hooks, so
-the agent knows to use psudo without you telling it.
+the agent knows to use `psudo` without you telling it.
 
 | | Claude Code | Codex |
 | --- | --- | --- |
 | Installed at | `~/.claude/hooks/psudo` | `$CODEX_HOME/root-hook/psudo` |
-| At session start | A `SessionStart` hook tells the model: root goes through psudo, `psudo -H` for remote hosts, never handle passwords, and what each exit code means. | The same, through Codex's `SessionStart` hook (trust it once in `/hooks`). |
-| Before each command | A `PreToolUse` guard denies `sudo` and `sshpass`, and denies credential-store reads that could reach psudo's password cache or stored secrets. It points the model to psudo. | Codex has no deny hook; the session context is the guidance. |
-| Approvals | The harness's own approval prompt still applies to every command. psudo adds its dialog on top of it. | Same. |
+| At session start | A `SessionStart` hook tells the model: root goes through `psudo`, `psudo -H` for remote hosts, never handle passwords, and what each exit code means. | The same, through Codex's `SessionStart` hook (trust it once in `/hooks`). |
+| Before each command | A `PreToolUse` guard denies `sudo` and `sshpass`, and denies credential-store reads that could reach harness-secrets-sudo-hook's password cache or stored secrets. It points the model to `psudo`. | Codex has no deny hook; the session context is the guidance. |
+| Approvals | The harness's own approval prompt still applies to every command. harness-secrets-sudo-hook adds its dialog on top of it. | Same. |
 
 **The guard.** The Claude Code guard reads each command the way the shell does.
 It denies `sudo` or `sshpass` where they would actually run: as a command, after
@@ -116,7 +116,7 @@ sequenceDiagram
 ```
 
 Tested end to end with headless Claude Code (Sonnet 5.5) and Codex (GPT-6.1-sol)
-sessions. Without being told about psudo, both used it for root on this computer
+sessions. Without being told about `psudo`, both used it for root on this computer
 and over SSH (including an SSH login dialog), and both reported cancels and
 failures accurately.
 
@@ -131,7 +131,7 @@ psudo --install=codex
 ```
 
 The formula has the project's name; the command it installs is `psudo`. The
-installer copies psudo into the harness's hook folder, so after
+installer copies `psudo` into the harness's hook folder, so after
 `brew upgrade harness-secrets-sudo-hook` run `psudo --install=…` again to update
 that copy.
 
@@ -195,7 +195,7 @@ psudo [-H <host>] [--] <command> [args...]
 - With no `-H`, the command runs on this computer.
 - The command is an argument vector, not a shell string: the target receives exactly the same arguments. For pipelines or `cd`, pass a shell: `psudo sh -c '…'`.
 - stdout and stderr pass through unchanged. The command's stdin is closed, so it can't prompt.
-- psudo takes no sudo options. Use `psudo runuser -u postgres -- psql` or `sh -c`.
+- `psudo` takes no sudo options. Use `psudo runuser -u postgres -- psql` or `sh -c`.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -206,7 +206,7 @@ psudo [-H <host>] [--] <command> [args...]
 | 252 | Authentication failed on the target; the command did not run |
 | 255 | SSH connection or login failed; no sudo password was requested |
 
-Every failure psudo itself causes prints one line starting with `psudo:`. For
+Every failure harness-secrets-sudo-hook itself causes prints one line starting with `psudo:`. For
 exit 252 it names the cause:
 
 | Message | Meaning |
@@ -220,11 +220,11 @@ exit 252 it names the cause:
 Some hosts ask for more than a key at SSH login. Nothing has to be set up per
 host:
 
-1. psudo first tries your `~/.ssh/config` with keys only.
-2. If that fails, psudo logs in itself. Each question ssh asks (for example
+1. harness-secrets-sudo-hook first tries your `~/.ssh/config` with keys only.
+2. If that fails, harness-secrets-sudo-hook logs in itself. Each question ssh asks (for example
    `Verification code:`) appears in a dialog titled **SSH login**, naming the
    host. The answer goes straight to ssh and is never stored.
-3. psudo keeps that connection for **30 minutes after its last use**, so later
+3. harness-secrets-sudo-hook keeps that connection for **30 minutes after its last use**, so later
    commands to that host only show the sudo dialog. `psudo --ssh-logout`
    closes it now.
 
@@ -252,11 +252,11 @@ guard can be worked around, and Codex has no deny hook. See
 
 ## Stored secrets
 
-psudo can also hand a stored secret (an API token, a database password, a
+harness-secrets-sudo-hook can also hand a stored secret (an API token, a database password, a
 kubeconfig) to a command, without the agent ever seeing the value. The command
 runs **as you, not as root**. The full design is in [docs/secrets.md](docs/secrets.md).
 
-**You only answer dialogs.** The agent learns about psudo from the session
+**You only answer dialogs.** The agent learns about `psudo` from the session
 context and starts everything itself:
 
 ```sh
@@ -265,19 +265,19 @@ psudo --secret STRIPE_API_KEY=stripe-api-key -- ./charge-report
 
 - **First use of a secret:** a **Secret needed** dialog shows the command and
   asks you for the value. Type or paste it. A second dialog asks where to keep
-  it (see below); press Return and it is kept **for this session only**. psudo
+  it (see below); press Return and it is kept **for this session only**. harness-secrets-sudo-hook
   also adds a rule to `config.json` that lets only this program use it (on this
   host), and runs the command.
 - **A stored secret used by a program for the first time:** one **Allow and add
   rule** dialog adds the rule.
-- **Later uses: no dialog.** psudo has the value and the rule covers the
+- **Later uses: no dialog.** harness-secrets-sudo-hook has the value and the rule covers the
   program, so the command just runs. A program the rule does not list is
-  refused. psudo only opens a dialog when it needs something from you.
-- **The program must stay the one you allowed.** psudo remembers the SHA-256
+  refused. harness-secrets-sudo-hook only opens a dialog when it needs something from you.
+- **The program must stay the one you allowed.** harness-secrets-sudo-hook remembers the SHA-256
   of the program file and asks again if the file is a different one later:
   after an update, or after someone edited or replaced it.
 - **Interpreters ask every time.** `python3`, `node`, `perl` and the like run
-  whatever code they are given, so a rule psudo adds for one keeps the
+  whatever code they are given, so a rule harness-secrets-sudo-hook adds for one keeps the
   Deny / Allow once dialog, which shows the whole command. Set
   `"confirm": false` in the rule to turn that off.
 - **Values already in a git-ignored `.env.local` or `.env`:** no dialog and no
@@ -293,7 +293,7 @@ psudo --secret STRIPE_API_KEY=stripe-api-key -- ./charge-report
 | **Save in `.env.local`** (or `.env`) | In the project's env file | Offered only when the project has one that **git ignores**. It is plain text, so the agent can read it; this is for projects that already work that way. Saved as the name in upper case: `stripe-api-key` is `STRIPE_API_KEY`. |
 | **Save in Keychain** (Linux: keyring) | In the OS credential store, for every project | Until you delete it with `psudo --secret-delete`. |
 
-psudo also finds values that are already in a git-ignored `.env.local` or `.env`,
+harness-secrets-sudo-hook also finds values that are already in a git-ignored `.env.local` or `.env`,
 under the same variable name. A value in the Keychain wins over one in an env
 file, because the agent can write the file.
 
@@ -307,7 +307,7 @@ psudo --secret-list            # names and rules, never values
 psudo --secret-delete=github-token
 ```
 
-**Rules** live in `~/.config/harness-root-hook/config.json`. psudo writes
+**Rules** live in `~/.config/harness-root-hook/config.json`. harness-secrets-sudo-hook writes
 them for you. Edit them to widen or narrow access:
 
 ```json
@@ -324,7 +324,7 @@ them for you. Edit them to widen or narrow access:
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `commands` | required | Programs that may receive the secret: a name found in the system directories (`/usr/bin`, `/opt/homebrew/bin`, …) or an absolute path. Shells, `env`, `printenv`, `echo`, `cat`, `ssh`, `sudo` and programs that run other programs are refused. |
-| `vars` | the secret's own name | Variables the secret may be put in. psudo fills this in from the first use. Without it, only the name in upper case (`github-token` is `GITHUB_TOKEN`). |
+| `vars` | the secret's own name | Variables the secret may be put in. harness-secrets-sudo-hook fills this in from the first use. Without it, only the name in upper case (`github-token` is `GITHUB_TOKEN`). |
 | `local` | `true` | Usable on this computer |
 | `ssh_hosts` | `[]` | Hosts (as given to `-H`) where it is usable |
 | `confirm` | `false` | `true` asks before each use (Deny / Allow once). By default an allowed program gets the secret without a dialog. |
@@ -338,7 +338,7 @@ psudo --secret-file KUBECONFIG=k8s-staging -- kubectl get pods
 psudo -H prod --secret PGPASSWORD=prod-db -- psql -h localhost -c 'select 1'
 ```
 
-When psudo does open a dialog, it shows the secrets, the host, the folder and
+When harness-secrets-sudo-hook does open a dialog, it shows the secrets, the host, the folder and
 the exact command. In the dialogs that ask for a decision, **the refusal is the
 default button** on macOS and with zenity, so pressing Return refuses.
 (kdialog has no way to choose the default button, so check which button has the
@@ -350,14 +350,14 @@ own. `--secret-file` writes a 0600 file that is deleted when the command ends.
 Secrets are replaced with `[REDACTED:<name>]` in the command's output.
 
 **Rule changes need your approval.** The agent can edit `config.json` too. So
-psudo uses the rules only after you approve them in a dialog, and any edit to
+harness-secrets-sudo-hook uses the rules only after you approve them in a dialog, and any edit to
 them asks again. A file with no rules asks nothing.
-Rules psudo adds through a Secret needed or Allow and add rule dialog count as
+Rules harness-secrets-sudo-hook adds through a Secret needed or Allow and add rule dialog count as
 approved by that dialog.
 
 **What this does not stop.** An allowed program can still send a secret it
 receives anywhere it likes, or run code it finds in the folder: git hooks,
-`.npmrc`, Makefiles. Since psudo does not ask before each use, the rule is the
+`.npmrc`, Makefiles. Since harness-secrets-sudo-hook does not ask before each use, the rule is the
 only gate: an allowed program gets the secret whenever the agent runs it. For
 tools like these, set `"confirm": true` in the rule to be asked every time. For `curl`, store the whole header line
 (`Authorization: Bearer …`) and use
@@ -373,10 +373,10 @@ deny hook.
 
 ## Limitations
 
-- Commands that need a terminal or their own input (for example a tool that reads a secret with the echo off) can't run through psudo. Run those yourself.
+- Commands that need a terminal or their own input (for example a tool that reads a secret with the echo off) can't run through `psudo`. Run those yourself.
 - The remote login shell must be POSIX-compatible (sh, bash, dash, zsh, ksh). Targets that set `requiretty` are unsupported. Targets that keep no sudo timestamp must allow `/bin/sh` in sudoers.
-- Scripts that call `sudo` internally work only when the whole script is the psudo command.
-- The guard is best effort (see above). psudo does not defend against a hostile program running as your user.
+- Scripts that call `sudo` internally work only when the whole script is the `psudo` command.
+- The guard is best effort (see above). harness-secrets-sudo-hook does not defend against a hostile program running as your user.
 
 ## Uninstall
 
@@ -397,7 +397,7 @@ make release VERSION=v1.2.3   # GitHub release from dist/ + Homebrew tap update;
 The local and remote transports run through the same test suite. It checks that
 the password never appears in output, argv or environment, and that every exit
 code and hook decision matches the spec. The full design is in
-[docs/psudo.md](docs/psudo.md).
+[docs/harness-secrets-sudo-hook.md](docs/harness-secrets-sudo-hook.md).
 
 **Earlier names.** The project was called `harness-root-hook` and then
 `harness-psudo-hook` (Power Sudo Harness Hook), and its Homebrew formula was

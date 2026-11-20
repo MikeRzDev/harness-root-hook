@@ -17,10 +17,10 @@ The installer:
   hook for `Bash` in `~/.claude/settings.json`. Other settings and hooks are
   kept in order, and the first run backs the file up to `settings.json.bak`;
 - registers `--hook=claude-code-session-start` as a `SessionStart` hook. It
-  tells each session about psudo from the start, including `psudo -H` for
+  tells each session about `psudo` from the start, including `psudo -H` for
   remote hosts. The guard alone only reacts to commands that contain `sudo`.
   Without this hook, a session asked for root on a host ran `ssh root@host`
-  and never used psudo;
+  and never used `psudo`;
 - registers `--hook=claude-code-session-end` as a `SessionEnd` hook. It forgets
   the secrets you chose to keep "for this session only" when the session ends
   (also on `/clear`);
@@ -67,7 +67,7 @@ store a password."*
 
 Ask Claude Code to run each of these:
 
-1. `sudo id -u`: denied, with the psudo hint.
+1. `sudo id -u`: denied, with the `psudo` hint.
 2. `~/.claude/hooks/psudo id -u`: one dialog naming *this computer* and `id -u`, then `0`.
    With the cache off (the default) every run shows the dialog.
 3. `~/.claude/hooks/psudo -H <your-ssh-alias> id -u`: a dialog naming the host, then `0`.

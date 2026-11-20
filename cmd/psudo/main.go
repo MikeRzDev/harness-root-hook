@@ -1,6 +1,6 @@
 // Command psudo runs a privileged command on this computer or on a host
 // reached over SSH. The sudo password is typed into a native dialog and
-// never enters the harness's context. See docs/psudo.md.
+// never enters the harness's context. See docs/harness-secrets-sudo-hook.md.
 package main
 
 import (

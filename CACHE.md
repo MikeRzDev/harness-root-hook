@@ -2,7 +2,7 @@
 
 Codex and Claude Code use the same cache implementation (built into `psudo`) and
 JSON settings on Linux and macOS. **Caching is off by default**: every command
-shows the dialog. When you turn it on (`"enabled": true`), psudo reuses a
+shows the dialog. When you turn it on (`"enabled": true`), harness-secrets-sudo-hook reuses a
 **sudo password** that sudo accepted for a command on this computer for
 `ttl_seconds` (7200, two hours). This is normally your own account password, not
 a separate root password.
@@ -87,9 +87,9 @@ unavailable. Linux requires a working desktop D-Bus session. Missing dependency,
 locked-store failure, or storage failure stops the authentication attempt.
 
 A password is stored only after sudo has accepted it. If sudo rejects a cached
-password, for example because you changed it, psudo deletes the entry and exits
+password, for example because you changed it, harness-secrets-sudo-hook deletes the entry and exits
 252 without retrying; the next command shows the dialog. Cancellation aborts the
-privileged action. psudo runs `sudo -k` before and after each command, so sudo's
+privileged action. harness-secrets-sudo-hook runs `sudo -k` before and after each command, so sudo's
 separate timestamp cache cannot bypass the configured expiry.
 
 Expired credentials are never reused. Linux removes expired entries on the next

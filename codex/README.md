@@ -18,7 +18,7 @@ up to `hooks.json.before-root-hook`. The installer also creates the shared
 `com.harness-root-hook.codex.reaper` cleanup task.
 
 Open `/hooks` in Codex, review and trust the hook, then start a new session. The
-hook only adds context telling Codex to use psudo. It never runs sudo, prompts
+hook only adds context telling Codex to use `psudo`. It never runs sudo, prompts
 for a password, or makes permission decisions. Codex's normal approval and
 sandbox rules still apply.
 
