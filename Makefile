@@ -26,6 +26,8 @@ dist: test
 	cd dist && shasum -a 256 *.tar.gz > SHA256SUMS
 
 TAP_REPO := MikeRzDev/homebrew-tap
+# The Homebrew formula carries the project's name; the command is psudo.
+FORMULA := harness-secrets-sudo-hook
 
 # Publishes a GitHub release from local artifacts, then the Homebrew formula.
 # Run only on purpose, from a clean tree:
@@ -37,15 +39,16 @@ release: dist formula
 	$(MAKE) tap VERSION=$(VERSION)
 
 formula:
-	scripts/brew-formula.sh $(VERSION) dist/SHA256SUMS > dist/psudo.rb
+	scripts/brew-formula.sh $(VERSION) dist/SHA256SUMS > dist/$(FORMULA).rb
 
-# Pushes dist/psudo.rb to the tap so `brew install MikeRzDev/tap/psudo` gets it.
+# Pushes the formula to the tap so `brew install MikeRzDev/tap/$(FORMULA)` gets
+# it. Formula/psudo.rb is the formula under its earlier name; it is removed.
 tap:
 	rm -rf dist/tap
 	gh repo clone $(TAP_REPO) dist/tap
 	mkdir -p dist/tap/Formula
-	cp dist/psudo.rb dist/tap/Formula/psudo.rb
-	cd dist/tap && git add Formula/psudo.rb && git commit -m "psudo $(VERSION)" && git push
+	cp dist/$(FORMULA).rb dist/tap/Formula/$(FORMULA).rb
+	cd dist/tap && git rm -q --ignore-unmatch Formula/psudo.rb && git add Formula/$(FORMULA).rb && git commit -m "$(FORMULA) $(VERSION)" && git push
 
 install-claude-code: build
 	bin/psudo --install=claude-code

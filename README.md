@@ -125,13 +125,18 @@ failures accurately.
 ### Homebrew (macOS and Linux)
 
 ```sh
-brew install MikeRzDev/tap/psudo
+brew install MikeRzDev/tap/harness-secrets-sudo-hook
 psudo --install=claude-code     # and/or
 psudo --install=codex
 ```
 
-The installer copies psudo into the harness's hook folder, so after
-`brew upgrade psudo` run `psudo --install=…` again to update that copy.
+The formula has the project's name; the command it installs is `psudo`. The
+installer copies psudo into the harness's hook folder, so after
+`brew upgrade harness-secrets-sudo-hook` run `psudo --install=…` again to update
+that copy.
+
+Up to v0.1.0 the formula was called `psudo`. If you installed that one, run
+`brew uninstall psudo` first.
 
 ### Go
 
@@ -140,8 +145,9 @@ go install github.com/MikeRzDev/harness-secrets-sudo-hook/cmd/psudo@latest
 "$(go env GOPATH)"/bin/psudo --install=claude-code     # and/or --install=codex
 ```
 
-Pin a version with `@v0.1.0` instead of `@latest`. Go builds it from source
-(Go 1.22+), so `go install` works on any platform Go targets.
+Pin a version with `@v0.2.0` instead of `@latest`; v0.2.0 is the first version
+under this module path. Go builds it from source (Go 1.22+), so `go install`
+works on any platform Go targets.
 
 ### From a release
 
@@ -394,8 +400,8 @@ code and hook decision matches the spec. The full design is in
 [docs/psudo.md](docs/psudo.md).
 
 **Earlier names.** The project was called `harness-root-hook` and then
-`harness-psudo-hook` (Power Sudo Harness Hook). The command is still `psudo`.
-Names on disk (the config directory, credential-store entries, launchd task,
+`harness-psudo-hook` (Power Sudo Harness Hook), and its Homebrew formula was
+`psudo`. The command is still `psudo`. Names on disk (the config directory, credential-store entries, launchd task,
 `HARNESS_ROOT_HOOK_CONFIG`) keep `harness-root-hook`, so existing installs keep
 working.
 
