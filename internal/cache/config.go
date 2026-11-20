@@ -74,8 +74,9 @@ func ParseConfig(data []byte) (int, error) {
 		return 0, fmt.Errorf("%w: config must be a JSON object", ErrConfig)
 	}
 	for key := range top {
-		if key != "cache" {
-			return 0, fmt.Errorf("%w: config must contain only a cache object", ErrConfig)
+		// "secrets" holds the rules for stored secrets (internal/secrets).
+		if key != "cache" && key != "secrets" {
+			return 0, fmt.Errorf("%w: config must contain only cache and secrets objects", ErrConfig)
 		}
 	}
 	enabled, ttl := false, DefaultTTL

@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"errors"
+	"os"
 	"os/exec"
 )
 
@@ -19,6 +20,8 @@ type ExecFunc func(name string, args []string, stdin []byte) (Result, error)
 // Run is the production ExecFunc.
 func Run(name string, args []string, stdin []byte) (Result, error) {
 	cmd := exec.Command(name, args...)
+	// Never the caller's environment as it is: see HelperEnv.
+	cmd.Env = HelperEnv(os.Environ())
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

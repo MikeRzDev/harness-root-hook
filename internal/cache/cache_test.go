@@ -340,3 +340,63 @@ func TestAccountResolvesWithoutCgo(t *testing.T) {
 		t.Fatal("could not resolve the current user name")
 	}
 }
+
+// HOME, USER and LOGNAME are replaced by the account's own values: the caller
+// of psudo must not choose where a command it starts reads its dotfiles.
+func TestIdentityIgnoresTheCallersEnvironment(t *testing.T) {
+	t.Setenv("HOME", "/tmp/elsewhere")
+	if Home() == "/tmp/elsewhere" || Home() == "" {
+		t.Skip("this build takes the home directory from $HOME (the account is not in the account database)")
+	}
+	got := Identity([]string{"PATH=/usr/bin", "HOME=/tmp/elsewhere", "USER=mallory", "LOGNAME=mallory", "LC_ALL=C"})
+	want := []string{"PATH=/usr/bin", "LC_ALL=C", "HOME=" + Home(), "USER=" + Account(), "LOGNAME=" + Account()}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// The programs psudo runs for itself must never work from a HOME the caller
+// chose. macOS's security tool finds the keychain through HOME: with a wrong
+// one it finds none, and macOS offers the user to reset the default keychain.
+func TestHelperProgramsNeverSeeTheCallersHome(t *testing.T) {
+	t.Setenv("HOME", "/tmp/not-my-home")
+	t.Setenv("USER", "mallory")
+	t.Setenv("CFFIXED_USER_HOME", "/tmp/not-my-home")
+	t.Setenv("DYLD_INSERT_LIBRARIES", "/tmp/x.dylib")
+	t.Setenv("LD_PRELOAD", "/tmp/x.so")
+	t.Setenv("KEPT_VARIABLE", "yes")
+	if Home() == "/tmp/not-my-home" || Home() == "" {
+		t.Skip("this build takes the home directory from $HOME (the account is not in the account database)")
+	}
+	res, err := Run("/usr/bin/env", nil, nil)
+	if err != nil || res.Code != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	got := "\n" + res.Stdout
+	for _, want := range []string{"\nHOME=" + Home() + "\n", "\nUSER=" + Account() + "\n", "\nLOGNAME=" + Account() + "\n", "\nKEPT_VARIABLE=yes\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in the helper's environment", strings.TrimSpace(want))
+		}
+	}
+	for _, bad := range []string{"not-my-home", "mallory", "CFFIXED_USER_HOME", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("%q reached the helper's environment", bad)
+		}
+	}
+}
+
+// On Linux the session bus is the user's standard one when it exists, not one
+// the caller names: psudo would otherwise store secrets in the caller's service.
+func TestSessionBusIsNotTheCallers(t *testing.T) {
+	env := []string{"PATH=/usr/bin", "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/fake-bus", "XDG_RUNTIME_DIR=/tmp/fake", "DISPLAY=:0"}
+	got := pinSessionBus(env, 1000, func(path string) bool { return path == "/run/user/1000/bus" })
+	want := []string{"PATH=/usr/bin", "DISPLAY=:0", "XDG_RUNTIME_DIR=/run/user/1000", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// Without the standard socket the caller's address is all there is.
+	got = pinSessionBus(env, 1000, func(string) bool { return false })
+	if strings.Join(got, "\n") != strings.Join(env, "\n") {
+		t.Fatalf("changed although there is no standard bus: %q", got)
+	}
+}

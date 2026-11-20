@@ -122,7 +122,7 @@ func (r *Runner) connect(ctx context.Context, host string) ([]string, bool) {
 	}
 	if dir == "" || r.Askpass == "" {
 		r.Stderr.Write(keyErr.Bytes())
-		r.fail("cannot reach %s over SSH with key authentication; no password was requested", host)
+		r.fail("cannot reach %s over SSH with key authentication; the command was not run", host)
 		return nil, false
 	}
 
@@ -132,12 +132,12 @@ func (r *Runner) connect(ctx context.Context, host string) ([]string, bool) {
 	}
 	token, err := newToken()
 	if err != nil {
-		r.fail("SSH FAILED: could not prepare the SSH login for %s. No sudo password was requested.", host)
+		r.fail("SSH FAILED: could not prepare the SSH login for %s. The command was not run.", host)
 		return nil, false
 	}
 	tf, err := os.OpenFile(tokenFile(dir, token), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		r.fail("SSH FAILED: could not prepare the SSH login for %s. No sudo password was requested.", host)
+		r.fail("SSH FAILED: could not prepare the SSH login for %s. The command was not run.", host)
 		return nil, false
 	}
 	tf.Close()
@@ -153,12 +153,18 @@ func (r *Runner) connect(ctx context.Context, host string) ([]string, bool) {
 	if err := r.ssh(ctx, env, &loginErr, login...); err != nil {
 		r.Stderr.Write(loginErr.Bytes())
 		r.fail("SSH FAILED: could not connect to or log in to %s (ssh's reason is above; an SSH login "+
-			"dialog that was cancelled, timed out or answered wrongly ends here too). No sudo password was requested.", host)
+			"dialog that was cancelled, timed out or answered wrongly ends here too). The command was not run.", host)
 		return nil, false
 	}
 	r.fail("logged in to %s over SSH; psudo keeps this connection for %d minutes after its last use "+
 		"(psudo --ssh-logout closes it now)", host, int(persist/time.Minute))
 	return sharedOpts(dir), true
+}
+
+// Connect is connect for other transports that reuse psudo's SSH logins. It
+// returns the extra ssh options and false when the host cannot be reached.
+func (r *Runner) Connect(ctx context.Context, host string) ([]string, bool) {
+	return r.connect(ctx, host)
 }
 
 // CloseShared ends every SSH connection psudo keeps in dir and returns how

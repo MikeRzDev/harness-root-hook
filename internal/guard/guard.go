@@ -27,8 +27,10 @@ func Reason(psudo string) string {
 }
 
 // CacheReason is shown when a command would read psudo's password cache.
-const CacheReason = "psudo's cached sudo password must never be read from the harness: do not run security or " +
-	"secret-tool on harness-root-hook entries. To clear the cache, run psudo --clear-cache."
+const CacheReason = "Credential-store secrets must never be read from the harness: psudo keeps the cached sudo " +
+	"password and stored secrets there. Do not print secrets with security or secret-tool. To give a stored " +
+	"secret to a command, run psudo --secret VAR=name -- <command> (psudo --secret-list shows the names); " +
+	"to clear the sudo cache, run psudo --clear-cache."
 
 type hookOutput struct {
 	HookSpecificOutput map[string]string `json:"hookSpecificOutput"`
@@ -96,7 +98,21 @@ func SessionContext(psudo string, codex bool) string {
 		"Exit 251: the user cancelled; stop that privileged action. 252: authentication failed (the psudo: line says " +
 		"WRONG PASSWORD, NOT PERMITTED or AUTHENTICATION FAILED); report it and do not retry another way. " +
 		"255: the SSH connection or login failed. The command's stdin is closed; a command that needs a terminal " +
-		"must be run by the user."
+		"must be run by the user. " +
+		"For a command that needs a stored secret (an API token, a database password), run " + p +
+		" --secret VAR=name [--secret-file VAR=name] [-H <ssh-host>] -- <command> [args...]: the command runs as " +
+		"the user, not root, with the secret in VAR (or a temporary file whose path is in VAR). psudo shows the user " +
+		"a dialog only when it needs something: the value of a secret it does not have, or a decision about a stored " +
+		"secret that no rule covers yet. " + p + " --secret-list shows the stored names and which commands may use them. " +
+		"Name a secret after the environment variable the project uses for it, in lower case with dashes " +
+		"(STRIPE_API_KEY is stripe-api-key): psudo then also finds its value in the project's git-ignored .env.local or .env. " +
+		"If psudo has no value for the secret yet, still run the command: psudo asks the user to enter the value in a dialog " +
+		"and, unless the user chooses to save it, keeps it for this session only, so a new session asks again. " +
+		"Never ask the user to run psudo or edit its config themselves. " +
+		"Never ask the user for a secret in chat, and never read one yourself from the OS credential store or from an env file. " +
+		"Keep using the variable a secret was first used with: its rule names it, and another one is refused. " +
+		"A value from an env file cannot be combined with a stored secret in one command. " +
+		"Exit 253: the user's rules do not allow that use; tell the user which rule is missing rather than finding another way."
 	if codex {
 		s += " Follow normal sandbox escalation and approval requirements; psudo does not grant approval."
 	}

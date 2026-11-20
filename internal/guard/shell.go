@@ -104,7 +104,17 @@ var (
 	assignment   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=`)
 	cachePattern = regexp.MustCompile(`harness-root-hook`)
 	cacheToolPat = regexp.MustCompile(`(^|[^A-Za-z0-9_-])(security|secret-tool)([^A-Za-z0-9_-]|$)`)
-	caseWord     = regexp.MustCompile(`(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)`)
+	// Reads that print a secret from any credential-store entry, which could
+	// be one of psudo's stored secrets (docs/secrets.md §7.1).
+	// security -i reads its commands from stdin, so what it does is not in
+	// its arguments: it counts as a read.
+	credReadPat = regexp.MustCompile(`find-(generic|internet)-password[^;&|\n]*\s-[A-Za-z]*[wg]|` +
+		`dump-keychain[^;&|\n]*\s-[A-Za-z]*d|secret-tool\s+(lookup|search)|` +
+		`security(\s+-[hlqv]+|\s+-p\s*\S+)*\s+-[hlqv]*i[hilqv]*([^A-Za-z0-9_-]|$)`)
+	flagCluster = regexp.MustCompile(`^-[A-Za-z]+$`)
+	// security's own options (-h -i -l -q -v) in a cluster that has -i.
+	interactive = regexp.MustCompile(`^-[hlqv]*i[hilqv]*$`)
+	caseWord    = regexp.MustCompile(`(^|[^A-Za-z0-9_])case([^A-Za-z0-9_]|$)`)
 )
 
 // textVerdict is the plain-text rule, used for code the guard does not parse
@@ -114,10 +124,87 @@ func textVerdict(s string) verdict {
 	if pattern.MatchString(s) {
 		v = denyRoot
 	}
-	if cachePattern.MatchString(s) && cacheToolPat.MatchString(s) {
+	if cacheToolPat.MatchString(s) && (cachePattern.MatchString(s) || credReadPat.MatchString(s)) {
 		v = worse(v, denyCache)
 	}
 	return v
+}
+
+// credentialRead reports whether security or secret-tool with args would
+// read psudo's entries or print a secret from any entry. An argument the
+// guard cannot judge ($x) counts as a read.
+func credentialRead(tool string, args []word) bool { return storeRead(tool, args, true) }
+
+// storeRead is credentialRead. With strict false, an argument the guard cannot
+// judge does not count: that is for a word that may be the program or only an
+// argument (grep security "$file"), where denying would refuse ordinary work.
+func storeRead(tool string, args []word, strict bool) bool {
+	sub := ""
+	for _, w := range args {
+		if strict && (w.dynamic || w.opaque) || cachePattern.MatchString(w.text) {
+			return true
+		}
+		if sub == "" && !strings.HasPrefix(w.text, "-") {
+			sub = w.text
+		}
+	}
+	if tool == "secret-tool" {
+		return sub == "lookup" || sub == "search"
+	}
+	// security -i (before any subcommand) reads its commands from stdin,
+	// where the guard cannot see them. -p takes a value.
+	for i := 0; i < len(args) && strings.HasPrefix(args[i].text, "-"); i++ {
+		if interactive.MatchString(args[i].text) {
+			return true
+		}
+		if args[i].text == "-p" {
+			i++
+		}
+	}
+	flags := ""
+	for _, w := range args {
+		if flagCluster.MatchString(w.text) {
+			flags += w.text[1:]
+		}
+	}
+	switch sub {
+	case "find-generic-password", "find-internet-password":
+		return strings.ContainsAny(flags, "wg")
+	case "dump-keychain":
+		return strings.Contains(flags, "d")
+	}
+	return false
+}
+
+// readsStore reports whether words, the arguments of a wrapper, contain a
+// credential-store read: security or secret-tool anywhere among them with
+// arguments that read. The program a wrapper runs may come after a value
+// (timeout 5 security …, find . -exec security …), so every position counts.
+func readsStore(words []word) bool {
+	for i, w := range words {
+		if name := base(w.text); cacheTools[name] && storeRead(name, words[i+1:], false) {
+			return true
+		}
+	}
+	return false
+}
+
+// psudoCommand returns the command psudo is asked to run: its arguments
+// after -H <host>, --secret and --secret-file options and "--".
+func psudoCommand(args []word) []word {
+	for i := 0; i < len(args); {
+		switch t := args[i].text; {
+		case t == "-H" || t == "--secret" || t == "--secret-file":
+			i += 2
+		case strings.HasPrefix(t, "--secret=") || strings.HasPrefix(t, "--secret-file="):
+			i++
+		case t == "--":
+			return args[i+1:]
+		default:
+			return args[i:]
+		}
+	}
+	return nil
 }
 
 // judge reports what a Bash command would do that psudo's guard denies.
@@ -588,9 +675,14 @@ func (pl *pipeline) verdict(full, self string) verdict {
 
 func (c *simpleCmd) textVerdict() verdict {
 	v := allow
-	for _, w := range c.words {
+	text := make([]string, len(c.words))
+	for i, w := range c.words {
 		v = worse(v, wordVerdict(w))
+		text[i] = w.text
 	}
+	// A credential-store read spans several words (security … -w), so the
+	// words are judged together as well.
+	v = worse(v, textVerdict(strings.Join(text, " ")))
 	for _, d := range c.heredocs {
 		v = worse(v, textVerdict(d.body))
 	}
@@ -615,16 +707,21 @@ func (c *simpleCmd) verdict(full, self string) (verdict, bool) {
 			return denyRoot, false
 		case name == "psudo" && isSelf(cw.text, self):
 			// The real psudo runs its arguments as root; sudo inside is harmless.
+			// A credential-store read is not: it prints a secret whoever runs
+			// it. So the command psudo is given is judged for that alone.
+			if rest := psudoCommand(c.words[k+1:]); len(rest) > 0 {
+				if v, _ := (&simpleCmd{words: rest}).verdict(full, self); v == denyCache {
+					return denyCache, false
+				}
+			}
 			return allow, false
 		case cw.dynamic || cw.opaque:
 			// The program is computed ($cmd, ${x:-…}, $'\x..'): it cannot be
 			// judged, so deny.
 			return denyRoot, true
 		case cacheTools[name]:
-			for _, w := range c.words[k+1:] {
-				if cachePattern.MatchString(w.text) {
-					return denyCache, false
-				}
+			if credentialRead(name, c.words[k+1:]) {
+				return denyCache, false
 			}
 			return allow, false
 		case carriers[name] || interpreter.MatchString(name):
@@ -635,6 +732,11 @@ func (c *simpleCmd) verdict(full, self string) (verdict, bool) {
 				if n := base(w.text); n == "sudo" || n == "sshpass" {
 					return denyRoot, false
 				}
+			}
+			// The same for a credential-store read: the program the wrapper
+			// runs may come after a value (timeout 5 security …, find . -exec …).
+			if readsStore(c.words[k+1:]) {
+				return denyCache, false
 			}
 			next := k + 1
 			for next < len(c.words) && (strings.HasPrefix(c.words[next].text, "-") || assignment.MatchString(c.words[next].text)) {

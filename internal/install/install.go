@@ -18,7 +18,12 @@ import (
 const (
 	ClaudeHookCommand    = `"$HOME"/.claude/hooks/psudo --hook=claude-code` // expanded by the hook shell; quoted for spaces
 	ClaudeSessionCommand = `"$HOME"/.claude/hooks/psudo --hook=claude-code-session-start`
-	claudeLegacyCommand  = "$HOME/.claude/hooks/sudo-check.sh"
+	// ClaudeSessionEndCommand forgets the secrets kept for a session when it ends.
+	ClaudeSessionEndCommand = `"$HOME"/.claude/hooks/psudo --hook=claude-code-session-end`
+	// sessionEndTimeout is in seconds. Claude Code gives SessionEnd hooks 1.5
+	// seconds unless the hook asks for more, and the credential store can be slower.
+	sessionEndTimeout   = 15
+	claudeLegacyCommand = "$HOME/.claude/hooks/sudo-check.sh"
 )
 
 var (
@@ -139,6 +144,15 @@ func (in *Installer) InstallClaudeCode() error {
 		session = append(session, group("", ClaudeSessionCommand, 10))
 	}
 	setEvent(root, "SessionStart", session)
+	// A secret kept "for this session only" is forgotten when the session ends.
+	ended, err := eventGroups(root, "SessionEnd")
+	if err != nil {
+		return err
+	}
+	if !hasHandler(ended, ClaudeSessionEndCommand) {
+		ended = append(ended, group("", ClaudeSessionEndCommand, sessionEndTimeout))
+	}
+	setEvent(root, "SessionEnd", ended)
 
 	configPath, err := cache.InitConfig()
 	if err != nil {
@@ -176,7 +190,7 @@ func (in *Installer) InstallClaudeCode() error {
 		os.Remove(filepath.Join(runtimeDir, "claude-sudo.cache"))
 	}
 	in.say("Installed %s", binary)
-	in.say("Registered the PreToolUse guard and the SessionStart context in %s", settings)
+	in.say("Registered the PreToolUse guard, the SessionStart context and the SessionEnd cleanup in %s", settings)
 	in.say("Settings: %s (password cache: off by default; set \"enabled\": true to cache local commands)", configPath)
 	in.say("Restart Claude Code, then ask it to run: %s id -u", binary)
 	return nil
@@ -201,6 +215,11 @@ func (in *Installer) UninstallClaudeCode() error {
 			return err
 		}
 		setEvent(root, "SessionStart", removeHandlers(session, func(c string) bool { return c == ClaudeSessionCommand }))
+		ended, err := eventGroups(root, "SessionEnd")
+		if err != nil {
+			return err
+		}
+		setEvent(root, "SessionEnd", removeHandlers(ended, func(c string) bool { return c == ClaudeSessionEndCommand }))
 		if err := writeSettings(settings, root); err != nil {
 			return err
 		}

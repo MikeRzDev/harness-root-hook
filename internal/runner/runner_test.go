@@ -220,6 +220,14 @@ func fakeSSH() int {
 		return 255
 	case host == "banner" && rest != "true":
 		fmt.Println("Welcome to banner")
+	case host == "echoes" && rest != "true":
+		// A forced command or an appliance shell: it ignores the command it
+		// is given and echoes whatever arrives on stdin.
+		sc := bufio.NewScanner(os.Stdin)
+		for sc.Scan() {
+			fmt.Println("unknown command: " + sc.Text())
+		}
+		return 0
 	}
 	cmd := exec.Command(testShell(), "-c", rest)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -536,6 +544,30 @@ func TestDroppedConnectionIsTransportFailure(t *testing.T) {
 	}
 }
 
+// A target that does not run psudo's script must never receive the password:
+// here it would echo it straight back into the output the model reads.
+func TestPasswordIsNotSentToATargetThatDoesNotRunTheScript(t *testing.T) {
+	f := newFixture(t, "echoes")
+	f.r.ReadyTimeout = 300 * time.Millisecond
+	code := f.run("id")
+	if code != runner.ExitAuthFailed || !strings.Contains(f.err.String(), "the password was not sent") {
+		t.Fatalf("exit %d stdout %q stderr %q", code, f.out.String(), f.err.String())
+	}
+	if len(f.asks) != 1 || strings.Contains(f.out.String(), "unknown command") {
+		t.Fatalf("asks %d, stdout %q", len(f.asks), f.out.String())
+	}
+	f.assertNoLeak()
+}
+
+// Characters the user cannot see are shown as escapes in the dialog.
+func TestDialogShowsHiddenCharacters(t *testing.T) {
+	f := newFixture(t, "")
+	f.run("echo", "safe\u202etxt.exe", "a\x1b[2Kb", "tab\there")
+	if len(f.asks) != 1 || f.asks[0].Command != `echo 'safe\u{202E}txt.exe' 'a\u{001B}[2Kb' 'tab	here'` {
+		t.Fatalf("dialog %+v", f.asks)
+	}
+}
+
 func TestLoginBannerPassesThrough(t *testing.T) {
 	f := newFixture(t, "banner")
 	if code := f.run("echo", "hi"); code != 0 || f.out.String() != "Welcome to banner\nhi\n" {
@@ -678,7 +710,9 @@ func TestWithoutInteractiveLoginOnlyKeysAreTried(t *testing.T) {
 
 func TestValidHost(t *testing.T) {
 	for host, ok := range map[string]bool{"web1": true, "me@example.com": true, "ssh://h:22": true,
-		"": false, "-oProxyCommand=x": false, "a b": false, "a\nb": false, "a\tb": false} {
+		"": false, "-oProxyCommand=x": false, "a b": false, "a\nb": false, "a\tb": false,
+		// Invisible and direction-changing characters would mislead the dialog.
+		"web1\u202egro.live": false, "web\u200b1": false, "web\u00a01": false, "a\x1b[2Kb": false} {
 		if runner.ValidHost(host) != ok {
 			t.Errorf("ValidHost(%q) != %v", host, ok)
 		}
@@ -686,11 +720,15 @@ func TestValidHost(t *testing.T) {
 }
 
 func TestEnvironmentFiltering(t *testing.T) {
-	env := []string{"PATH=/evil", "HOME=/h", "LD_PRELOAD=x", "DYLD_INSERT_LIBRARIES=y", "LC_ALL=C",
-		"SSH_AUTH_SOCK=/s", "SSH_ASKPASS=/a", "BASH_ENV=/b"}
+	env := []string{"PATH=/evil", "HOME=/h", "USER=other", "LOGNAME=other", "LD_PRELOAD=x", "DYLD_INSERT_LIBRARIES=y",
+		"LC_ALL=C", "SSH_AUTH_SOCK=/s", "SSH_ASKPASS=/a", "BASH_ENV=/b"}
 	local := strings.Join(runner.LocalEnv(env), " ")
-	if local != "PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/h LC_ALL=C" {
-		t.Fatalf("local env %q", local)
+	// HOME, USER and LOGNAME are the account's, never the caller's: sudo may
+	// hand HOME on to the root command, which reads its dotfiles from there.
+	want := "PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C HOME=" + cache.Home() +
+		" USER=" + cache.Account() + " LOGNAME=" + cache.Account()
+	if local != want || cache.Home() == "/h" {
+		t.Fatalf("local env %q, want %q", local, want)
 	}
 	ssh := strings.Join(runner.SSHEnv(env), " ")
 	if strings.Contains(ssh, "LD_") || strings.Contains(ssh, "DYLD_") || strings.Contains(ssh, "ASKPASS") ||

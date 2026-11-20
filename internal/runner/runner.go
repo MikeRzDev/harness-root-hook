@@ -38,6 +38,12 @@ const (
 // positional parameters, never interpolated. It is a single line so it also
 // survives login shells that dislike newlines inside quotes.
 //
+// The script first reports "<marker> ready". psudo sends the password only
+// after that line, so the password never goes to a target that is not running
+// this script: a forced command, a login shell that is not a POSIX shell or a
+// startup file that reads stdin gets no input, and cannot echo the password
+// back into the output.
+//
 // The password is the first line of stdin. It is read into a shell variable
 // (never exported, never in any process's argv) and stdin is then closed for
 // everything that follows, so the command can never read it. Each sudo that
@@ -64,7 +70,7 @@ const (
 const Script = `s=$1; m=$2; shift 2; ` +
 	`if [ -z "$s" ]; then for c in /usr/bin/sudo /bin/sudo /usr/local/bin/sudo /run/wrappers/bin/sudo /run/current-system/sw/bin/sudo; do if [ -x "$c" ]; then s=$c; break; fi; done; fi; ` +
 	`if [ -z "$s" ]; then echo 'psudo: sudo not found on target' >&2; printf '%s nosudo\n' "$m"; exit 1; fi; ` +
-	`IFS= read -r p || p=; exec </dev/null; ` +
+	`printf '%s ready\n' "$m"; IFS= read -r p || p=; exec </dev/null; ` +
 	`"$s" -k; ` +
 	`f=$(mktemp 2>/dev/null) || f=/dev/null; ` +
 	`if printf '%s\n' "$p" | LC_ALL=C "$s" -S -p '' -v 2>"$f"; then t=ok; else ` +
@@ -81,6 +87,14 @@ const Script = `s=$1; m=$2; shift 2; ` +
 	`if [ "$x" = ticket ]; then p=; "$s" -n -- "$@"; rc=$?; ` +
 	`else printf '%s\n' "$p" | "$s" -k -S -p '' -- /bin/sh -c 'exec "$@" </dev/null' psudo "$@"; rc=$?; p=; fi; ` +
 	`"$s" -k; exit "$rc"`
+
+// StatusReady is the first line both remote scripts report: the script is
+// running and is about to read stdin.
+const StatusReady = "ready"
+
+// DefaultReadyWait bounds the wait for StatusReady: the time the target needs
+// to start the script, after the connection itself is up.
+const DefaultReadyWait = 30 * time.Second
 
 // Status values reported by Script before the command runs.
 const (
@@ -111,6 +125,9 @@ type Runner struct {
 	ControlDir func() (string, error)
 	Askpass    string        // the askpass program: psudo itself
 	Persist    time.Duration // 0 means DefaultPersist
+	// ReadyTimeout is how long to wait for the script to report that it is
+	// running before giving up without sending anything. 0 means DefaultReadyWait.
+	ReadyTimeout time.Duration
 
 	// Password cache for local targets. A nil Store disables caching.
 	Store func() (cache.Store, error)
@@ -123,17 +140,26 @@ type Runner struct {
 }
 
 // ValidHost rejects destinations that ssh could parse as options or that
-// would be ambiguous in the dialog.
+// would be ambiguous in the dialog: whitespace, control characters, and
+// characters that are invisible or change the direction of the text.
 func ValidHost(host string) bool {
 	if host == "" || strings.HasPrefix(host, "-") {
 		return false
 	}
 	for _, r := range host {
-		if unicode.IsSpace(r) || unicode.IsControl(r) {
+		if unicode.IsSpace(r) || r == unicode.ReplacementChar || !unicode.IsPrint(r) {
 			return false
 		}
 	}
 	return true
+}
+
+// ReadyWait is the effective ReadyTimeout.
+func (r *Runner) ReadyWait() time.Duration {
+	if r.ReadyTimeout > 0 {
+		return r.ReadyTimeout
+	}
+	return DefaultReadyWait
 }
 
 // RemoteCommand builds the string ssh hands to the remote login shell.
@@ -149,6 +175,9 @@ func SSHArgs(host string, command string, extra ...string) []string {
 	args := append([]string{"-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"}, extra...)
 	return append(args, "--", host, command)
 }
+
+// NewMarker returns a random status-line marker.
+func NewMarker() string { return newMarker() }
 
 func newMarker() string {
 	b := make([]byte, 16)
@@ -268,7 +297,7 @@ func (r *Runner) Run(ctx context.Context, host string, argv []string) int {
 	}
 
 	if password == nil {
-		pw, err := r.Ask(ctx, prompt.Request{Title: r.Title, Host: host, Command: shquote.Join(argv),
+		pw, err := r.Ask(ctx, prompt.Request{Title: r.Title, Host: host, Command: shquote.Visible(shquote.Join(argv)),
 			Timeout: prompt.DefaultTimeout})
 		switch {
 		case errors.Is(err, prompt.ErrNoProvider):
@@ -316,18 +345,30 @@ func (r *Runner) Run(ctx context.Context, host string, argv []string) int {
 		return ExitAuthFailed
 	}
 
-	// The password goes only to the pipe; a write error means the child
-	// already exited, which the marker check below reports.
-	stdin.Write(password)
-	stdin.Write([]byte{'\n'})
-	stdin.Close()
-
+	// The password is sent only after the script reports that it is the one
+	// reading stdin. Until then nothing is written, so whatever else runs on
+	// the target first cannot receive the password or print it.
 	reader := bufio.NewReader(stdout)
+	timer := time.AfterFunc(r.ReadyWait(), func() { cmd.Process.Kill() })
 	status, overflow := r.awaitStatus(reader, marker)
-	if overflow {
+	timer.Stop()
+	sent := status == StatusReady && !overflow
+	if sent {
+		// The password goes only to the pipe; a write error means the child
+		// already exited, which the marker check below reports.
+		stdin.Write(password)
+		stdin.Write([]byte{'\n'})
+	}
+	stdin.Close()
+	if sent {
+		status, overflow = r.awaitStatus(reader, marker)
+	} else if status == StatusReady {
+		status = ""
+	}
+	if overflow || (!sent && status == "") {
 		cmd.Process.Kill()
 	}
-	validated := status == statusOK
+	validated := sent && status == statusOK
 	if validated {
 		if !fromCache && store != nil && ttl > 0 {
 			rec := cache.Record{Password: string(password), CreatedAt: float64(r.Now().UnixNano()) / 1e9, TTLSeconds: ttl}
@@ -369,6 +410,9 @@ func (r *Runner) Run(ctx context.Context, host string, argv []string) int {
 		return ExitSSHFailed
 	case overflow:
 		r.fail("AUTHENTICATION FAILED: unexpected output before authentication completed. The command was not run.")
+	case !sent:
+		r.fail("AUTHENTICATION FAILED: %s did not start psudo's script, so the password was not sent. Its login shell must be "+
+			"POSIX-compatible and must run the command it is given. The command was not run.", target)
 	default:
 		r.fail("AUTHENTICATION FAILED: %s did not report an authentication result (exit %d). The command was not run.", target, code)
 	}
@@ -378,6 +422,13 @@ func (r *Runner) Run(ctx context.Context, host string, argv []string) int {
 // awaitStatus forwards output that precedes the status line and returns the
 // status Script reported, or "" when none arrived.
 func (r *Runner) awaitStatus(reader *bufio.Reader, marker string) (status string, overflow bool) {
+	return AwaitStatus(reader, marker, r.Stdout)
+}
+
+// AwaitStatus copies output to w until a line "<marker> <status>", and
+// returns that status, or "" when none arrived. overflow means more than
+// 64 KiB came first.
+func AwaitStatus(reader *bufio.Reader, marker string, w io.Writer) (status string, overflow bool) {
 	prefix := marker + " "
 	total, lineStart := 0, true
 	for {
@@ -387,7 +438,7 @@ func (r *Runner) awaitStatus(reader *bufio.Reader, marker string) (status string
 			if lineStart && strings.HasPrefix(line, prefix) && strings.HasSuffix(line, "\n") {
 				return strings.TrimSuffix(strings.TrimPrefix(line, prefix), "\n"), false
 			}
-			r.Stdout.Write(chunk)
+			w.Write(chunk)
 			total += len(chunk)
 			lineStart = chunk[len(chunk)-1] == '\n'
 			if total > maxPreamble {
@@ -403,10 +454,13 @@ func (r *Runner) awaitStatus(reader *bufio.Reader, marker string) (status string
 	}
 }
 
-var localKeep = []string{"HOME", "USER", "LOGNAME", "TERM", "LANG", "TZ"}
+var localKeep = []string{"TERM", "LANG", "TZ"}
 
 // LocalEnv is a minimal environment for the local shell. PATH is fixed so a
 // caller cannot substitute a program for the one receiving the password.
+// HOME, USER and LOGNAME come from the account database, not from the caller:
+// where sudo keeps HOME (as on macOS), the root command would otherwise read
+// its dotfiles from a folder the caller chose, which the dialog does not show.
 func LocalEnv(environ []string) []string {
 	env := []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	for _, kv := range environ {
@@ -421,7 +475,7 @@ func LocalEnv(environ []string) []string {
 			}
 		}
 	}
-	return env
+	return cache.Identity(env)
 }
 
 // SSHEnv keeps the user's environment (agent socket, config lookups) but
@@ -436,5 +490,8 @@ func SSHEnv(environ []string) []string {
 		}
 		env = append(env, kv)
 	}
-	return env
+	// HOME, USER and LOGNAME are the account's own here as well: what ssh
+	// starts (a ProxyCommand, psudo as its askpass program) must not work
+	// from a home folder the caller chose.
+	return cache.Identity(env)
 }

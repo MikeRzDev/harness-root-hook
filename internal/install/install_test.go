@@ -109,7 +109,8 @@ func TestClaudeCodeInstallRepeatUninstall(t *testing.T) {
 	}
 	first := read(t, settings)
 	if strings.Contains(first, "sudo-check.sh") || !strings.Contains(first, jsonString(ClaudeHookCommand)) ||
-		!strings.Contains(first, jsonString(ClaudeSessionCommand)) {
+		!strings.Contains(first, jsonString(ClaudeSessionCommand)) || !strings.Contains(first, `"SessionEnd": [`) ||
+		!strings.Contains(first, jsonString(ClaudeSessionEndCommand)+",\n            \"timeout\": 15") {
 		t.Fatalf("settings after install:\n%s", first)
 	}
 	if strings.Index(first, `"model"`) > strings.Index(first, `"hooks"`) || !strings.Contains(first, "echo mine") {

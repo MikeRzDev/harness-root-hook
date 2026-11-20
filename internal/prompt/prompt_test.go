@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
 )
 
 const evil = `rm -rf "/tmp/x" ; echo '$(id)' <b>bold</b> & "quote" \" end tell`
@@ -98,5 +100,76 @@ func TestAskHardTimeoutIsCancel(t *testing.T) {
 	defer cancel()
 	if _, err := e.Ask(ctx, Request{Timeout: time.Second}); !errors.Is(err, ErrCancelled) {
 		t.Fatal(err)
+	}
+}
+
+func TestChoose(t *testing.T) {
+	buttons := []string{"Deny", "Allow once", "Allow for 10 min"}
+	type outcome struct {
+		out  string
+		code int
+	}
+	for _, tc := range []struct {
+		goos, tool string
+		n          int
+		got        outcome
+		want       int
+	}{
+		{"darwin", "", 3, outcome{"Allow once\n", 0}, 1},
+		{"darwin", "", 3, outcome{"Allow for 10 min\n", 0}, 2},
+		{"darwin", "", 3, outcome{"", 0}, 0}, // gave up
+		{"darwin", "", 3, outcome{"", 1}, 0}, // Deny is the cancel button
+		{"linux", "zenity", 3, outcome{"", 0}, 1},
+		{"linux", "zenity", 3, outcome{"Allow for 10 min\n", 1}, 2},
+		{"linux", "zenity", 3, outcome{"", 1}, 0},
+		{"linux", "zenity", 3, outcome{"", 5}, 0}, // timeout
+		{"linux", "kdialog", 3, outcome{"", 0}, 1},
+		{"linux", "kdialog", 3, outcome{"", 1}, 2},
+		{"linux", "kdialog", 3, outcome{"", 2}, 0},
+		{"linux", "kdialog", 2, outcome{"", 1}, 0},
+	} {
+		e := env(tc.goos, ":0", "", tc.tool)
+		var argv []string
+		e.Run = func(_ context.Context, name string, args []string) ([]byte, int, error) {
+			argv = args
+			return []byte(tc.got.out), tc.got.code, nil
+		}
+		got, err := e.Choose(context.Background(), Choice{Title: "t", Text: evil, Buttons: buttons[:tc.n]})
+		if err != nil || got != tc.want {
+			t.Errorf("%+v: got %d %v", tc, got, err)
+		}
+		if tc.goos == "darwin" && (argv[1] != macChoose || argv[3] != evil || argv[5] != "Deny") {
+			t.Errorf("osascript argv %q", argv)
+		}
+		// The refusal has the focus, so Return does not approve.
+		if tc.tool == "zenity" && argv[1] != "--default-cancel" {
+			t.Errorf("zenity argv %q", argv)
+		}
+	}
+	// On macOS the first button is the default button and must not also be
+	// the cancel button: with both, Return does nothing and the user has to
+	// click a button to get rid of the dialog.
+	if !strings.Contains(macChoose, "default button 1") || strings.Contains(macChoose, "cancel button") {
+		t.Errorf("the macOS choice dialog must name button 1 as the default button only:\n%s", macChoose)
+	}
+	// A login prompt comes from the SSH server: hidden characters are shown.
+	if msg := LoginMessage("web-1", "Password\u202e:\x1b[2J "); !strings.Contains(msg, `Password\u{202E}:\u{001B}[2J`) {
+		t.Errorf("login message %q", msg)
+	}
+	if _, err := env("linux", ":0", "", "ssh-askpass").Choose(context.Background(), Choice{Buttons: buttons}); !errors.Is(err, ErrNoProvider) {
+		t.Fatal("ssh-askpass cannot show buttons")
+	}
+}
+
+// A dialog program is started with the account's own HOME, whatever the
+// caller of psudo put in the environment.
+func TestDialogProgramDoesNotGetTheCallersHome(t *testing.T) {
+	t.Setenv("HOME", "/tmp/not-my-home")
+	out, code, err := runDialog(context.Background(), "/usr/bin/env", nil)
+	if err != nil || code != 0 {
+		t.Fatalf("%v %d", err, code)
+	}
+	if strings.Contains(string(out), "HOME=/tmp/not-my-home") && cache.Home() != "/tmp/not-my-home" {
+		t.Fatalf("the caller's HOME reached the dialog program:\n%s", out)
 	}
 }

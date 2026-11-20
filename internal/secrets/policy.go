@@ -1,0 +1,458 @@
+// Package secrets runs a command with stored secrets in its environment or in
+// temporary files, after checking the user's rules and asking the user. See
+// docs/secrets.md.
+package secrets
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"unicode"
+
+	"github.com/MikeRzDev/harness-psudo-hook/internal/cache"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/envfile"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
+)
+
+// MaxValue is the largest secret psudo stores.
+const MaxValue = 64 << 10
+
+// MaxRemember bounds remember_seconds.
+const MaxRemember = 86400
+
+var (
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+	varRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+)
+
+// ValidName reports whether name is a valid secret name.
+func ValidName(name string) bool { return nameRe.MatchString(name) }
+
+// reservedVars and reservedPrefixes are variables that make a program load
+// code, run another program or read its settings from somewhere else: the
+// loader, shells, interpreters, git, npm, pagers and editors. A value put in
+// one of them is an instruction, not a credential, so no secret may go there.
+//
+// The list cannot be complete, since every tool has variables of its own. It
+// is not what keeps a secret safe. Two other rules are: a rule names the
+// variables its secret may be put in (Rule.Vars), and a value from an env
+// file, which the agent can write, never shares a command with a stored
+// secret (Runner.Run).
+var reservedVars = map[string]bool{"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
+	"TMPDIR": true, "IFS": true, "ENV": true, "BASH_ENV": true, "SSH_AUTH_SOCK": true,
+	"CDPATH": true, "GLOBIGNORE": true, "SHELLOPTS": true, "BASHOPTS": true, "PROMPT_COMMAND": true, "PS4": true,
+	"HISTFILE": true, "ZDOTDIR": true, "FPATH": true,
+	"NODE_OPTIONS": true, "NODE_PATH": true, "PERLLIB": true, "RUBYOPT": true, "RUBYLIB": true, "RUBYSHELL": true,
+	"GEM_HOME": true, "GEM_PATH": true, "BUNDLE_GEMFILE": true,
+	"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true,
+	"GOFLAGS": true, "MAKEFLAGS": true, "RUSTC_WRAPPER": true,
+	"GCONV_PATH": true, "LOCPATH": true, "NLSPATH": true, "HOSTALIASES": true, "TERMINFO": true, "TERMCAP": true,
+	"BROWSER": true, "EDITOR": true, "VISUAL": true, "PAGER": true, "MANPAGER": true, "LESSOPEN": true, "LESSCLOSE": true,
+	"SSH_ASKPASS": true, "SUDO_ASKPASS": true, "CFFIXED_USER_HOME": true}
+
+var reservedPrefixes = []string{"LD_", "DYLD_", "PSUDO_", "BASH_", "PYTHON", "PERL5", "GIT_", "XDG_",
+	"NPM_CONFIG_", "npm_config_"}
+
+// ValidVar reports whether v may receive a secret.
+func ValidVar(v string) bool {
+	if !varRe.MatchString(v) || reservedVars[v] {
+		return false
+	}
+	for _, p := range reservedPrefixes {
+		if strings.HasPrefix(v, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// forbidden programs can never receive a secret: they print it, or run a
+// program or code chosen in their arguments. coreutils and toybox are
+// multi-call binaries like busybox: the name they are run under picks the
+// program, so allowing one of their programs would allow env and cat too.
+var forbidden = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true, "fish": true, "csh": true,
+	"tcsh": true, "ash": true, "busybox": true, "env": true, "printenv": true, "echo": true, "printf": true,
+	"cat": true, "tee": true, "xargs": true, "nohup": true, "time": true, "exec": true, "command": true,
+	"builtin": true, "eval": true, "nice": true, "ionice": true, "timeout": true, "stdbuf": true, "watch": true,
+	"setsid": true, "script": true, "sudo": true, "doas": true, "su": true, "sshpass": true, "ssh": true,
+	"scp": true, "sftp": true, "run0": true, "pkexec": true, "runuser": true, "chroot": true, "nsenter": true,
+	"unshare": true, "systemd-run": true, "strace": true, "ltrace": true, "gdb": true, "lldb": true,
+	"dtruss": true, "osascript": true, "expect": true, "psudo": true, "flock": true, "parallel": true,
+	"caffeinate": true, "unbuffer": true, "find": true, "coreutils": true, "toybox": true,
+}
+
+// Rule is what the user allows for one secret (docs/secrets.md §5.3).
+type Rule struct {
+	Commands []string
+	// Vars are the variables the secret may be put in. The caller picks the
+	// variable of each request, and the name decides what a program does with
+	// the value: a token given to git as GIT_AUTHOR_NAME ends up in a commit
+	// anyone can read. So the variable is part of the rule. Without vars, the
+	// only one allowed is the secret's own name in upper case with "_" for
+	// "-" (github-token is GITHUB_TOKEN).
+	Vars            []string
+	Local           bool
+	SSHHosts        []string
+	Confirm         bool
+	RememberSeconds int
+}
+
+// allowsVar reports whether the rule for the secret called name lets it be
+// put in the variable v.
+func (r Rule) allowsVar(name, v string) bool {
+	if len(r.Vars) > 0 {
+		return slices.Contains(r.Vars, v)
+	}
+	own, ok := envfile.Key(name)
+	return ok && v == own
+}
+
+// Policy maps secret names to rules.
+type Policy map[string]Rule
+
+// ErrConfig reports invalid rules. Every secret request fails closed on it.
+var ErrConfig = errors.New("invalid secrets rules")
+
+// ParsePolicy reads the "secrets" object of the config file. A config
+// without one has no rules.
+func ParsePolicy(data []byte) (Policy, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(data), &top); err != nil {
+		return nil, fmt.Errorf("%w: config must be a JSON object", ErrConfig)
+	}
+	raw, ok := top["secrets"]
+	if !ok {
+		return Policy{}, nil
+	}
+	var entries map[string]json.RawMessage
+	if err := strictObject(raw, &entries); err != nil {
+		return nil, fmt.Errorf("%w: secrets must be an object", ErrConfig)
+	}
+	p := Policy{}
+	for name, body := range entries {
+		if !ValidName(name) {
+			return nil, fmt.Errorf("%w: %q is not a valid secret name", ErrConfig, name)
+		}
+		rule, err := parseRule(name, body)
+		if err != nil {
+			return nil, err
+		}
+		p[name] = rule
+	}
+	return p, nil
+}
+
+func strictObject(raw json.RawMessage, v any) error {
+	t := bytes.TrimSpace(raw)
+	if len(t) == 0 || t[0] != '{' {
+		return errors.New("not an object")
+	}
+	return json.Unmarshal(t, v)
+}
+
+func parseRule(name string, body json.RawMessage) (Rule, error) {
+	bad := func(format string, args ...any) (Rule, error) {
+		return Rule{}, fmt.Errorf("%w: secrets.%s: "+format, append([]any{ErrConfig, name}, args...)...)
+	}
+	var fields map[string]json.RawMessage
+	if err := strictObject(body, &fields); err != nil {
+		return bad("must be an object")
+	}
+	// confirm is false unless the rule says otherwise: a program the rule
+	// lists gets the secret without a dialog before each use.
+	r := Rule{Local: true}
+	for key, value := range fields {
+		var err error
+		switch key {
+		case "commands":
+			err = json.Unmarshal(value, &r.Commands)
+		case "vars":
+			err = json.Unmarshal(value, &r.Vars)
+		case "ssh_hosts":
+			err = json.Unmarshal(value, &r.SSHHosts)
+		case "local":
+			err = strictBool(value, &r.Local)
+		case "confirm":
+			err = strictBool(value, &r.Confirm)
+		case "remember_seconds":
+			err = json.Unmarshal(value, &r.RememberSeconds)
+			if err == nil && (r.RememberSeconds < 0 || r.RememberSeconds > MaxRemember) {
+				return bad("remember_seconds must be from 0 to %d", MaxRemember)
+			}
+		default:
+			return bad("unknown field %q", key)
+		}
+		if err != nil {
+			return bad("%s has the wrong type", key)
+		}
+	}
+	if err := r.Validate(); err != nil {
+		return bad("%v", err)
+	}
+	return r, nil
+}
+
+// Limits on what a rule may contain. The rules are shown to the user for
+// approval, so every string in them must fit on a line and be readable.
+const (
+	maxCommandLen = 1024
+	maxHostLen    = 255
+	maxEntries    = 64
+)
+
+// plain reports whether s can be shown on one line as it is: no control
+// characters, no invisible or direction-changing characters, and no space
+// other than the ASCII one.
+func plain(s string) bool {
+	for _, r := range s {
+		if r == unicode.ReplacementChar || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return s == strings.TrimSpace(s)
+}
+
+// Validate reports what is wrong with a rule's commands and hosts. It applies
+// to rules read from the config file and to rules psudo suggests.
+func (r Rule) Validate() error {
+	if len(r.Commands) == 0 {
+		return errors.New("commands must list at least one program")
+	}
+	if len(r.Commands) > maxEntries || len(r.SSHHosts) > maxEntries || len(r.Vars) > maxEntries {
+		return fmt.Errorf("commands, vars and ssh_hosts may each list at most %d entries", maxEntries)
+	}
+	for _, v := range r.Vars {
+		if !ValidVar(v) {
+			return fmt.Errorf("%q in vars is not a variable a secret may be put in", v)
+		}
+	}
+	for _, c := range r.Commands {
+		if c == "" || (strings.Contains(c, "/") && !filepath.IsAbs(c) && !strings.HasPrefix(c, "~/")) {
+			return fmt.Errorf("command %q must be a program name or an absolute path", c)
+		}
+		if len(c) > maxCommandLen || !plain(c) {
+			return fmt.Errorf("command %q must be plain text on one line (at most %d bytes)", c, maxCommandLen)
+		}
+		if forbidden[filepath.Base(c)] {
+			return fmt.Errorf("%q cannot receive secrets: it can print them or run other programs", c)
+		}
+	}
+	for _, h := range r.SSHHosts {
+		if len(h) > maxHostLen || !runner.ValidHost(h) {
+			return fmt.Errorf("ssh host %q is not valid", h)
+		}
+	}
+	return nil
+}
+
+func strictBool(raw json.RawMessage, b *bool) error {
+	switch string(bytes.TrimSpace(raw)) {
+	case "true":
+		*b = true
+	case "false":
+		*b = false
+	default:
+		return errors.New("not a boolean")
+	}
+	return nil
+}
+
+// LoadPolicy reads the rules from path; a missing file has no rules.
+func LoadPolicy(path string) (Policy, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Policy{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ParsePolicy(data)
+}
+
+// Use is one secret delivered to the command.
+type Use struct {
+	Var, Name string
+	File      bool
+}
+
+// ParseUse parses VAR=name.
+func ParseUse(s string, file bool) (Use, error) {
+	v, name, ok := strings.Cut(s, "=")
+	if !ok || !ValidVar(v) {
+		return Use{}, fmt.Errorf("%q: expected VAR=name with a usable variable name", s)
+	}
+	if !ValidName(name) {
+		return Use{}, fmt.Errorf("%q: secret names use a-z, 0-9, _ and -", s)
+	}
+	return Use{Var: v, Name: name, File: file}, nil
+}
+
+// Request is one psudo --secret invocation.
+type Request struct {
+	Host string // "" is this computer
+	Dir  string // working directory, shown in the dialog
+	Uses []Use
+	Argv []string
+}
+
+// Decision is the result of checking a request against the policy.
+type Decision struct {
+	Path     string // the program to run locally; "" on a remote host
+	Confirm  bool
+	Remember int // seconds; 0 offers only "Allow once"
+}
+
+// Refusal explains why a request is not allowed. It names what the user
+// would have to change.
+type Refusal struct{ Msg string }
+
+func (r *Refusal) Error() string { return r.Msg }
+
+func refuse(format string, args ...any) *Refusal { return &Refusal{fmt.Sprintf(format, args...)} }
+
+// homeDir is where "~/" in a rule points: the account's home directory, not
+// $HOME. The caller of psudo sets $HOME, and could otherwise make a rule for
+// ~/bin/tool match a file in a folder of its own.
+var homeDir = cache.Home
+
+func expand(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		if home := homeDir(); home != "" {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
+func same(a, b string) bool {
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	if err1 != nil || err2 != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ra == rb
+}
+
+// Check decides whether req may run. find resolves a bare program name in
+// the trusted directories (sysbin.Find in production).
+func Check(p Policy, req Request, find func(string) string) (Decision, error) {
+	if len(req.Argv) == 0 || len(req.Uses) == 0 {
+		return Decision{}, refuse("no command or no secret given")
+	}
+	seen := map[string]bool{}
+	for _, u := range req.Uses {
+		if seen[u.Var] {
+			return Decision{}, refuse("%s is given more than once", u.Var)
+		}
+		seen[u.Var] = true
+	}
+	argv0 := req.Argv[0]
+	// On an SSH host the name is all psudo has to go on; locally the resolved
+	// file is checked as well, below.
+	if argv0 == "" || forbidden[filepath.Base(argv0)] {
+		return Decision{}, refuse("%q can never receive secrets", argv0)
+	}
+	d := Decision{Remember: MaxRemember}
+	if req.Host == "" {
+		switch {
+		case strings.Contains(argv0, "/") && !filepath.IsAbs(argv0):
+			return Decision{}, refuse("%q is a relative path; give a program name or an absolute path", argv0)
+		case strings.Contains(argv0, "/"):
+			d.Path = filepath.Clean(argv0)
+		default:
+			d.Path = find(argv0)
+			if d.Path == "" {
+				return Decision{}, refuse("%q was not found in the system directories psudo trusts (%s); "+
+					"the user can allow it by absolute path in the rule's commands", argv0, strings.Join(sysbin.Dirs, ", "))
+			}
+		}
+		// Resolve once and run exactly the resolved file: a symlink checked
+		// here could otherwise be repointed while the dialog is open.
+		real, err := filepath.EvalSymlinks(d.Path)
+		if err != nil {
+			return Decision{}, refuse("%q could not be resolved: %v", argv0, err)
+		}
+		d.Path = real
+		if forbidden[filepath.Base(real)] {
+			return Decision{}, refuse("%q can never receive secrets", argv0)
+		}
+	}
+	confirm := false
+	for _, u := range req.Uses {
+		rule, ok := p[u.Name]
+		if !ok {
+			return Decision{}, refuse("there is no rule for secret %q; the user must add one under \"secrets\" in config.json", u.Name)
+		}
+		if req.Host == "" && !rule.Local {
+			return Decision{}, refuse("secret %q may not be used on this computer (its rule sets \"local\": false)", u.Name)
+		}
+		if req.Host != "" && !slices.Contains(rule.SSHHosts, req.Host) {
+			return Decision{}, refuse("secret %q may not be used on %s (not in its rule's ssh_hosts)", u.Name, req.Host)
+		}
+		if !commandAllowed(rule.Commands, req.Host, argv0, d.Path, find) {
+			return Decision{}, refuse("secret %q may not be used with %q (not in its rule's commands)", u.Name, argv0)
+		}
+		if !rule.allowsVar(u.Name, u.Var) {
+			if len(rule.Vars) > 0 {
+				return Decision{}, refuse("secret %q may not be put in %s (its rule's vars allow: %s)", u.Name, u.Var,
+					strings.Join(rule.Vars, ", "))
+			}
+			own, _ := envfile.Key(u.Name)
+			return Decision{}, refuse("secret %q may not be put in %s (its rule has no \"vars\", so only %s is allowed)",
+				u.Name, u.Var, own)
+		}
+		confirm = confirm || rule.Confirm
+		if rule.Confirm && rule.RememberSeconds < d.Remember {
+			d.Remember = rule.RememberSeconds
+		}
+	}
+	d.Confirm = confirm
+	if !confirm {
+		d.Remember = 0
+	}
+	return d, nil
+}
+
+func commandAllowed(entries []string, host, argv0, path string, find func(string) string) bool {
+	for _, e := range entries {
+		bare := !strings.Contains(e, "/")
+		if host != "" {
+			// Remote: the name as given must match the entry exactly.
+			if bare && argv0 == e || !bare && filepath.IsAbs(e) && filepath.Clean(argv0) == filepath.Clean(e) {
+				return true
+			}
+			continue
+		}
+		if bare {
+			if f := find(e); f != "" && same(f, path) {
+				return true
+			}
+		} else if same(expand(e), path) {
+			return true
+		}
+	}
+	return false
+}
+
+// Names returns the secret names in uses, sorted and unique.
+func Names(uses []Use) []string {
+	set := map[string]bool{}
+	for _, u := range uses {
+		set[u.Name] = true
+	}
+	var out []string
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}

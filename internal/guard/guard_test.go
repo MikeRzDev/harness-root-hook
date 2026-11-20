@@ -145,6 +145,52 @@ func TestPasswordCacheReadsAreDenied(t *testing.T) {
 		"security find-generic-password -s some-other-service":               "allow",
 		"psudo --clear-cache":              "allow",
 		"grep harness-root-hook README.md": "allow",
+		// Reads that print any entry's secret could reach psudo's stored secrets.
+		"security find-generic-password -a me -w":                "deny",
+		"security find-generic-password -gs github":              "deny",
+		"security -q find-internet-password -s x -w":             "deny",
+		"security dump-keychain -d":                              "deny",
+		"security find-generic-password $OPTS":                   "deny",
+		"secret-tool search --all application x":                 "deny",
+		"secret-tool lookup service github":                      "deny",
+		"sh -c 'security find-generic-password -a me -w'":        "deny",
+		"security add-generic-password -s harness-root-hook.x":   "deny",
+		"security dump-keychain":                                 "allow",
+		"security list-keychains":                                "allow",
+		"secret-tool store --label=x service y":                  "allow",
+		"/p/psudo --secret GH_TOKEN=github-token -- gh api user": "allow",
+
+		// Found by audit: the read sits behind a wrapper's value, arrives on
+		// security's stdin, or is the command given to psudo itself.
+		"timeout 5 security find-generic-password -s foo -w":                              "deny",
+		"nice -n 5 security find-generic-password -a me -w":                               "deny",
+		`find . -maxdepth 0 -exec security find-generic-password -s x -w \;`:              "deny",
+		"xargs -n 1 security find-generic-password -w -s":                                 "deny",
+		"timeout 5 secret-tool lookup service github":                                     "deny",
+		"timeout 5 security delete-generic-password -s harness-root-hook.approvals.rules": "deny",
+		"echo 'find-generic-password -s x -w' | security -i":                              "deny",
+		"security -i <<< 'find-generic-password -s x -w'":                                 "deny",
+		"security -q -i":             "deny",
+		"security -p '> ' -i":        "deny",
+		"sh -c 'security -i < cmds'": "deny",
+		"/home/u/.claude/hooks/psudo security find-generic-password -s x -w":         "deny",
+		"/home/u/.claude/hooks/psudo sh -c 'security find-generic-password -s x -w'": "deny",
+		"/home/u/.claude/hooks/psudo -H web1 secret-tool lookup service github":      "deny",
+		"timeout 5 security list-keychains":                                          "allow",
+		"security find-identity -v -p codesigning":                                   "allow",
+		"/home/u/.claude/hooks/psudo ls /etc/security":                               "allow",
+		"/home/u/.claude/hooks/psudo apt install libsecret-tools":                    "allow",
+		"/home/u/.claude/hooks/psudo sh -c 'sudo -u postgres psql'":                  "allow",
+
+		"/home/u/.claude/hooks/psudo timeout 5 security find-generic-password -s x -w":       "deny",
+		"/home/u/.claude/hooks/psudo --secret T=x -- security find-generic-password -s x -w": "deny",
+		"/home/u/.claude/hooks/psudo security find-generic-password $OPTS":                   "deny",
+		// The word as an argument of another program is not a read.
+		"find . -name security -print":                                                "allow",
+		`timeout 30 grep -rn security "$PWD/docs"`:                                    "allow",
+		"/home/u/.claude/hooks/psudo find /etc -name security -print":                 "allow",
+		"/home/u/.claude/hooks/psudo vim /etc/security/limits.conf":                   "allow",
+		"/home/u/.claude/hooks/psudo -H web1 --secret-file K=kube -- kubectl get pod": "allow",
 	} {
 		if got := decide(t, bash(command)); got != want {
 			t.Errorf("%q: %s, want %s", command, got, want)

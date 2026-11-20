@@ -21,6 +21,7 @@ import (
 	"github.com/MikeRzDev/harness-psudo-hook/internal/install"
 	"github.com/MikeRzDev/harness-psudo-hook/internal/prompt"
 	"github.com/MikeRzDev/harness-psudo-hook/internal/runner"
+	"github.com/MikeRzDev/harness-psudo-hook/internal/secrets"
 	"github.com/MikeRzDev/harness-psudo-hook/internal/sysbin"
 )
 
@@ -48,6 +49,17 @@ dialog too, and the connection is kept for 30 minutes after its last use.
 Exit codes: the command's own code, or
   250  no password dialog available     251  dialog cancelled or timed out
   252  sudo rejected the password        255  SSH connection or login failed
+
+Stored secrets (the command runs as you, not as root; see docs/secrets.md):
+  psudo [-H <host>] --secret VAR=name [--secret-file VAR=name]... [--] <command> [args...]
+  A value you enter when a command needs it is kept for this session only, unless
+  you choose to save it in the project's git-ignored env file or the OS credential
+  store. The two commands below save in the OS credential store.
+  psudo --secret-set=<name>      store a value typed into a dialog
+  psudo --secret-import=<name>   store a value read from stdin (may be multi-line)
+  psudo --secret-list            show stored secret names and their rules
+  psudo --secret-delete=<name>   delete a stored secret (asks first)
+  Exit 253: not allowed by the rules in config.json; 254: credential store unavailable.
 
 Administration:
   psudo --install=claude-code|codex      psudo --uninstall=claude-code|codex
@@ -119,11 +131,19 @@ func askpass(ask prompt.Asker, getenv func(string) string, host string, args []s
 	return 0
 }
 
+// askpassAllowed reports whether psudo, started as ssh's askpass program, may
+// show a login dialog for host. The token must belong to a login the runner
+// is performing right now, and the host, which comes from the environment and
+// is shown in the dialog, must be one that psudo -H would accept.
+func askpassAllowed(host, dir, token string) bool {
+	return runner.ValidHost(host) && runner.AskpassAuthorized(dir, token)
+}
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if host := os.Getenv(runner.AskpassHostEnv); host != "" {
 		// Only a login the runner is performing right now may show a dialog.
 		dir, err := runner.ControlDir()
-		if err != nil || !runner.AskpassAuthorized(dir, os.Getenv(runner.AskpassTokenEnv)) {
+		if err != nil || !askpassAllowed(host, dir, os.Getenv(runner.AskpassTokenEnv)) {
 			fmt.Fprintln(stderr, "psudo: refused to show an SSH login dialog that psudo did not start")
 			return 1
 		}
@@ -133,20 +153,43 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if len(args) > 0 && strings.HasPrefix(args[0], "--") && args[0] != "--" {
+	if len(args) > 0 && strings.HasPrefix(args[0], "--") && args[0] != "--" && !secretOption(args[0]) {
 		return admin(args, stdin, stdout, stderr)
 	}
-	host := ""
-	if len(args) > 0 && args[0] == "-H" {
-		if len(args) < 2 {
-			fmt.Fprint(stderr, "psudo: -H requires a host\n"+usage)
+	host, hostSet := "", false
+	var uses []secrets.Use
+	for len(args) > 0 {
+		a := args[0]
+		if a == "-H" {
+			if hostSet || len(args) < 2 {
+				fmt.Fprint(stderr, "psudo: -H requires one host\n"+usage)
+				return runner.ExitUsage
+			}
+			host, hostSet, args = args[1], true, args[2:]
+			if !runner.ValidHost(host) {
+				fmt.Fprintln(stderr, "psudo: invalid SSH host")
+				return runner.ExitUsage
+			}
+			continue
+		}
+		if !secretOption(a) {
+			break
+		}
+		opt, value, inline := strings.Cut(a, "=")
+		args = args[1:]
+		if !inline {
+			if len(args) == 0 {
+				fmt.Fprintf(stderr, "psudo: %s requires VAR=name\n", opt)
+				return runner.ExitUsage
+			}
+			value, args = args[0], args[1:]
+		}
+		u, err := secrets.ParseUse(value, opt == "--secret-file")
+		if err != nil {
+			fmt.Fprintf(stderr, "psudo: %s %v\n", opt, err)
 			return runner.ExitUsage
 		}
-		host, args = args[1], args[2:]
-		if !runner.ValidHost(host) {
-			fmt.Fprintln(stderr, "psudo: invalid SSH host")
-			return runner.ExitUsage
-		}
+		uses = append(uses, u)
 	}
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
@@ -161,6 +204,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	exe := executable()
 	harness := harnessOf(exe)
+	if len(uses) > 0 {
+		return runSecrets(harness, exe, host, uses, args, stdin, stdout, stderr)
+	}
 	title := titleFor(harness, "sudo password")
 	localSudo := sysbin.Find("sudo")
 	if host == "" && localSudo == "" {
@@ -191,6 +237,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return r.Run(context.Background(), host, args)
 }
 
+// tidySessions forgets the secrets of sessions whose harness is gone, when a
+// new session starts. macOS has the cleanup task for that; elsewhere this is
+// what removes them after a harness that was killed. Failures are ignored: a
+// session must start whether or not the credential store is available.
+func tidySessions(harness string) {
+	if runtime.GOOS != "darwin" {
+		forget(harness, "")
+	}
+}
+
 func loadTTL() (int, error) {
 	path, err := cache.ConfigPath()
 	if err != nil {
@@ -205,6 +261,10 @@ func admin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runner.ExitUsage
 	}
 	name, value, _ := strings.Cut(strings.TrimPrefix(args[0], "--"), "=")
+	switch name {
+	case "secret-set", "secret-import", "secret-list", "secret-delete":
+		return secretAdmin(name, value, stdin, stdout, stderr)
+	}
 	exe := executable()
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "psudo: "+err.Error())
@@ -236,10 +296,17 @@ func admin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			err = guard.ClaudeCode(stdin, stdout, exe)
 		case "claude-code-session-start":
 			err = guard.SessionStart(stdin, stdout, exe, false)
+			tidySessions("claude-code")
 		case "codex-session-start":
 			err = guard.Codex(stdin, stdout, exe)
+			tidySessions("codex")
+		case "claude-code-session-end":
+			err = endSession(stdin, "claude-code")
+		case "codex-session-end":
+			err = endSession(stdin, "codex")
 		default:
-			fmt.Fprintln(stderr, "psudo: --hook must be claude-code, claude-code-session-start or codex-session-start")
+			fmt.Fprintln(stderr, "psudo: --hook must be claude-code, claude-code-session-start, claude-code-session-end, "+
+				"codex-session-start or codex-session-end")
 			return runner.ExitUsage
 		}
 		if err != nil {
@@ -281,6 +348,11 @@ func admin(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if !validHarness(harness) {
 			fmt.Fprintf(stderr, "psudo: --%s harness must be claude-code or codex\n", name)
 			return runner.ExitUsage
+		}
+		if name == "purge-expired" {
+			// The cleanup task also forgets the secrets of sessions whose
+			// harness is gone, whatever happens to the password cache below.
+			forget(harness, "")
 		}
 		unlock, err := cache.Lock(harness)
 		if err != nil {

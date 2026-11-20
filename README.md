@@ -77,7 +77,7 @@ the agent knows to use psudo without you telling it.
 | --- | --- | --- |
 | Installed at | `~/.claude/hooks/psudo` | `$CODEX_HOME/root-hook/psudo` |
 | At session start | A `SessionStart` hook tells the model: root goes through psudo, `psudo -H` for remote hosts, never handle passwords, and what each exit code means. | The same, through Codex's `SessionStart` hook (trust it once in `/hooks`). |
-| Before each command | A `PreToolUse` guard denies `sudo`, `sshpass`, and reads of psudo's password cache, and points the model to psudo. | Codex has no deny hook; the session context is the guidance. |
+| Before each command | A `PreToolUse` guard denies `sudo` and `sshpass`, and denies credential-store reads that could reach psudo's password cache or stored secrets. It points the model to psudo. | Codex has no deny hook; the session context is the guidance. |
 | Approvals | The harness's own approval prompt still applies to every command. psudo adds its dialog on top of it. | Same. |
 
 **The guard.** The Claude Code guard reads each command the way the shell does.
@@ -235,6 +235,120 @@ Service, and any program running as you can read it there, including the
 agent's own shell. The Claude Code guard denies commands that read it, but a
 guard can be worked around, and Codex has no deny hook. See
 [password caching](CACHE.md) for details.
+
+## Stored secrets
+
+psudo can also hand a stored secret (an API token, a database password, a
+kubeconfig) to a command, without the agent ever seeing the value. The command
+runs **as you, not as root**. The full design is in [docs/secrets.md](docs/secrets.md).
+
+**You only answer dialogs.** The agent learns about psudo from the session
+context and starts everything itself:
+
+```sh
+psudo --secret STRIPE_API_KEY=stripe-api-key -- ./charge-report
+```
+
+- **First use of a secret:** a **Secret needed** dialog shows the command and
+  asks you for the value. Type or paste it. A second dialog asks where to keep
+  it (see below); press Return and it is kept **for this session only**. psudo
+  also adds a rule to `config.json` that lets only this program use it (on this
+  host), and runs the command.
+- **A stored secret used by a program for the first time:** one **Allow and add
+  rule** dialog adds the rule.
+- **Later uses: no dialog.** psudo has the value and the rule covers the
+  program, so the command just runs. A program the rule does not list is
+  refused. psudo only opens a dialog when it needs something from you.
+- **Values already in a git-ignored `.env.local` or `.env`:** no dialog and no
+  rule at all; the agent could read that file anyway. Such a value cannot be
+  combined with a stored secret in one command, because the agent can write
+  the file.
+
+**Where a secret is kept.** Nothing outlives the session unless you choose it:
+
+| Choice | Kept | Notes |
+| --- | --- | --- |
+| **This session only** (default) | Until this Claude Code or Codex session ends | A new session asks again. Another session cannot use it. |
+| **Save in `.env.local`** (or `.env`) | In the project's env file | Offered only when the project has one that **git ignores**. It is plain text, so the agent can read it; this is for projects that already work that way. Saved as the name in upper case: `stripe-api-key` is `STRIPE_API_KEY`. |
+| **Save in Keychain** (Linux: keyring) | In the OS credential store, for every project | Until you delete it with `psudo --secret-delete`. |
+
+psudo also finds values that are already in a git-ignored `.env.local` or `.env`,
+under the same variable name. A value in the Keychain wins over one in an env
+file, because the agent can write the file.
+
+**Optional: manage secrets yourself.** You don't need any of this for the
+flow above:
+
+```sh
+psudo --secret-set=github-token                          # type the value into a dialog; kept in the Keychain
+psudo --secret-import=k8s-staging < ~/.kube/staging.yaml # multi-line values; asks before storing
+psudo --secret-list            # names and rules, never values
+psudo --secret-delete=github-token
+```
+
+**Rules** live in `~/.config/harness-root-hook/config.json`. psudo writes
+them for you. Edit them to widen or narrow access:
+
+```json
+{
+  "cache": { "enabled": false, "ttl_seconds": 7200 },
+  "secrets": {
+    "github-token": { "commands": ["gh"], "vars": ["GH_TOKEN"] },
+    "k8s-staging":  { "commands": ["kubectl"], "vars": ["KUBECONFIG"] },
+    "prod-db":      { "commands": ["psql"], "vars": ["PGPASSWORD"], "local": false, "ssh_hosts": ["prod"] }
+  }
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `commands` | required | Programs that may receive the secret: a name found in the system directories (`/usr/bin`, `/opt/homebrew/bin`, …) or an absolute path. Shells, `env`, `printenv`, `echo`, `cat`, `ssh`, `sudo` and programs that run other programs are refused. |
+| `vars` | the secret's own name | Variables the secret may be put in. psudo fills this in from the first use. Without it, only the name in upper case (`github-token` is `GITHUB_TOKEN`). |
+| `local` | `true` | Usable on this computer |
+| `ssh_hosts` | `[]` | Hosts (as given to `-H`) where it is usable |
+| `confirm` | `false` | `true` asks before each use (Deny / Allow once). By default an allowed program gets the secret without a dialog. |
+| `remember_seconds` | `0` | Offer "Allow for N min" for exactly the same command (max 86400) |
+
+**More forms the agent uses:**
+
+```sh
+psudo --secret GH_TOKEN=github-token -- gh api user
+psudo --secret-file KUBECONFIG=k8s-staging -- kubectl get pods
+psudo -H prod --secret PGPASSWORD=prod-db -- psql -h localhost -c 'select 1'
+```
+
+When psudo does open a dialog, it shows the secrets, the host, the folder and
+the exact command. In the dialogs that ask for a decision, **the refusal is the
+default button** on macOS and with zenity, so pressing Return refuses.
+(kdialog has no way to choose the default button, so check which button has the
+focus there.) The command then gets a fixed environment: your account's own
+`HOME`, `USER` and `LOGNAME` (never the caller's), locale, `SSH_AUTH_SOCK`,
+`PATH` set to the system directories, and the secrets. The `XDG_*` directories
+are not passed, so the caller cannot point the program at a config folder of its
+own. `--secret-file` writes a 0600 file that is deleted when the command ends.
+Secrets are replaced with `[REDACTED:<name>]` in the command's output.
+
+**Rule changes need your approval.** The agent can edit `config.json` too. So
+psudo uses the rules only after you approve them in a dialog, and any edit to
+them asks again. A file with no rules asks nothing.
+Rules psudo adds through a Secret needed or Allow and add rule dialog count as
+approved by that dialog.
+
+**What this does not stop.** An allowed program can still send a secret it
+receives anywhere it likes, or run code it finds in the folder: git hooks,
+`.npmrc`, Makefiles. Since psudo does not ask before each use, the rule is the
+only gate: an allowed program gets the secret whenever the agent runs it. For
+tools like these, set `"confirm": true` in the rule to be asked every time. For `curl`, store the whole header line
+(`Authorization: Bearer …`) and use
+`--secret-file H=name -- curl -H @"$H" …` (with `curl` in the rule). On Codex,
+nothing blocks the agent from reading the Keychain directly, since Codex has no
+deny hook.
+
+| Exit code | Meaning |
+| --- | --- |
+| 251 | You denied the request or the rule change, or the dialog timed out |
+| 253 | Not allowed: the program can never receive secrets (a shell, `env`, …), or the command or host isn't in the secret's rule |
+| 254 | The credential store is unavailable, or the secret couldn't be delivered on the host |
 
 ## Limitations
 

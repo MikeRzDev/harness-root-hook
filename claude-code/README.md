@@ -21,6 +21,9 @@ The installer:
   remote hosts. The guard alone only reacts to commands that contain `sudo`.
   Without this hook, a session asked for root on a host ran `ssh root@host`
   and never used psudo;
+- registers `--hook=claude-code-session-end` as a `SessionEnd` hook. It forgets
+  the secrets you chose to keep "for this session only" when the session ends
+  (also on `/clear`);
 - creates `~/.config/harness-root-hook/config.json` if it is missing;
 - on macOS, registers the `com.harness-root-hook.claude-code.reaper` launchd
   task, which deletes expired Keychain entries every five minutes without
