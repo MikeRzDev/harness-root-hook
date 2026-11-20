@@ -346,9 +346,36 @@ var runsCode = regexp.MustCompile(`^(python[0-9.]*|pypy[0-9.]*|perl[0-9.]*|ruby[
 	`php[0-9.]*|[gmn]?awk|lua[0-9.]*|luajit|tclsh[0-9.]*|wish|rscript|pwsh|powershell|swift|groovy|jshell|jrunscript|irb|` +
 	`java|scala|kotlin|elixir|erl|ghci|runghc|runhaskell|racket|guile|julia|octave|sbcl|clojure|bb)$`)
 
-// RunsCode reports whether the program is an interpreter.
+// RunsCode reports whether the program is an interpreter, going by its name.
 func RunsCode(program string) bool {
 	return runsCode.MatchString(strings.ToLower(filepath.Base(program)))
+}
+
+// commonInterpreters are looked up through find, to recognise one of them
+// under another name.
+var commonInterpreters = []string{"python3", "python", "perl", "ruby", "node", "nodejs", "deno", "bun", "php",
+	"awk", "gawk", "mawk", "nawk", "lua", "tclsh", "Rscript", "swift", "java", "pwsh"}
+
+// interpreterFile reports whether file, the resolved program, is an
+// interpreter: by its own name, or because it is the same file as an
+// interpreter found through find (a hard link under another name). A copy of
+// an interpreter under another name is not recognised.
+func interpreterFile(file string, find func(string) string) bool {
+	if RunsCode(file) {
+		return true
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return false
+	}
+	for _, name := range commonInterpreters {
+		if p := find(name); p != "" {
+			if other, err := os.Stat(p); err == nil && os.SameFile(info, other) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Refusal explains why a request is not allowed. It names what the user

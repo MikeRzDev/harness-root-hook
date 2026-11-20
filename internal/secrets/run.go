@@ -84,6 +84,10 @@ type Runner struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 	Signals        <-chan os.Signal
+
+	// beforeStart, in tests, runs between the check of the program file and
+	// the start of the program.
+	beforeStart func()
 }
 
 func (r *Runner) fail(format string, args ...any) {
@@ -176,6 +180,21 @@ func (r *Runner) Run(ctx context.Context, req Request) int {
 	if err != nil {
 		r.fail("NOT ALLOWED: %v. The command was not run.", err)
 		return ExitNotAllowed
+	}
+	// Whether the program is an interpreter is judged by the file that will
+	// run, not only by the name it was called by: a link called deploy-tool
+	// that points at python3 is python3. A rule for an interpreter asks
+	// before each use.
+	if req.Host == "" && len(newRules) > 0 && interpreterFile(decision.Path, r.Find) {
+		for n, rule := range newRules {
+			rule.Confirm = true
+			newRules[n] = rule
+		}
+		effective = merge(policy, newRules)
+		if decision, err = Check(effective, req, r.Find); err != nil {
+			r.fail("NOT ALLOWED: %v. The command was not run.", err)
+			return ExitNotAllowed
+		}
 	}
 	// A suggested rule is written to the config file, so it has to be a rule
 	// the file may contain.
@@ -313,10 +332,11 @@ func (r *Runner) Run(ctx context.Context, req Request) int {
 	if req.Host == "" {
 		// Last of all, right before the program starts: is it still the
 		// program the user allowed?
-		if code, ok := r.pinProgram(ctx, approvals, req, decision, st, fromProject); !ok {
+		identity, code, ok := r.pinProgram(ctx, approvals, req, decision, st, fromProject)
+		if !ok {
 			return code
 		}
-		return r.local(ctx, req, decision.Path, values, stdout, stderr)
+		return r.local(ctx, req, decision.Path, identity, values, stdout, stderr)
 	}
 	return r.remote(ctx, req, values, stdout, stderr)
 }
@@ -324,25 +344,37 @@ func (r *Runner) Run(ctx context.Context, req Request) int {
 // pinProgram checks that the program about to receive stored secrets is the
 // file it was when the user allowed it (see pins.go), and asks when it is
 // not. The first use of a program is remembered without a question.
-func (r *Runner) pinProgram(ctx context.Context, a *Approvals, req Request, d Decision, st *stores, fromProject func(string) bool) (int, bool) {
+//
+// It returns the identity of the file it read, which local compares once more
+// right before the start ("" when nothing was checked).
+func (r *Runner) pinProgram(ctx context.Context, a *Approvals, req Request, d Decision, st *stores, fromProject func(string) bool) (string, int, bool) {
 	var names []string
 	for _, n := range Names(req.Uses) {
 		if !fromProject(n) { // a value from the env file is nothing the agent could not read
 			names = append(names, n)
 		}
 	}
-	if len(names) == 0 || !replaceable(d.Path) {
-		return 0, true
+	if len(names) == 0 {
+		return "", 0, true
+	}
+	before, err := fileIdentity(d.Path)
+	if err != nil {
+		r.fail("could not read %s to check that it is the program you allowed (%v). The command was not run.", d.Path, err)
+		return "", ExitStore, false
 	}
 	sum, err := fileSum(d.Path)
 	if err != nil {
 		r.fail("could not read %s to check that it is the program you allowed (%v). The command was not run.", d.Path, err)
-		return ExitStore, false
+		return "", ExitStore, false
+	}
+	if after, err := fileIdentity(d.Path); err != nil || after != before {
+		r.fail("NOT ALLOWED: %s changed while psudo was checking it. The command was not run.", d.Path)
+		return "", ExitNotAllowed, false
 	}
 	pins, err := a.Pins()
 	if err != nil {
 		r.fail("could not read the OS credential store. The command was not run.")
-		return ExitStore, false
+		return "", ExitStore, false
 	}
 	update := map[string]string{}
 	var changed []string
@@ -365,16 +397,16 @@ func (r *Runner) pinProgram(ctx context.Context, a *Approvals, req Request, d De
 			Buttons: []string{"Deny", "Allow this version"}},
 			"the program has changed since the user allowed it, and the user did not allow the new version (or the dialog timed out).")
 		if !ok {
-			return code, false
+			return "", code, false
 		}
 	}
 	if len(update) > 0 {
 		if err := a.SetPins(update); err != nil {
 			r.fail("could not remember the program in the OS credential store. The command was not run.")
-			return ExitStore, false
+			return "", ExitStore, false
 		}
 	}
-	return 0, true
+	return before, 0, true
 }
 
 func (r *Runner) retitle(what string) string {
@@ -653,7 +685,7 @@ func (r *Runner) start(cmd *exec.Cmd) (func() int, error) {
 	}, nil
 }
 
-func (r *Runner) local(ctx context.Context, req Request, path string, values map[string][]byte, stdout, stderr io.Writer) int {
+func (r *Runner) local(ctx context.Context, req Request, path, identity string, values map[string][]byte, stdout, stderr io.Writer) int {
 	if ctx.Err() != nil {
 		r.fail("interrupted; the command was not run")
 		return runner.ExitCancelled
@@ -685,6 +717,18 @@ func (r *Runner) local(ctx context.Context, req Request, path string, values map
 	cmd.Args[0] = req.Argv[0]
 	cmd.Env = ChildEnv(r.Environ, extra)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = r.Stdin, stdout, stderr
+	if r.beforeStart != nil {
+		r.beforeStart()
+	}
+	// The last look at the file: it must still be the one whose contents
+	// were checked (see pins.go). Nothing else happens between this and the
+	// start of the program.
+	if identity != "" {
+		if now, err := fileIdentity(path); err != nil || now != identity {
+			r.fail("NOT ALLOWED: %s changed after psudo checked it. The command was not run.", path)
+			return ExitNotAllowed
+		}
+	}
 	wait, err := r.start(cmd)
 	if err != nil {
 		r.fail("could not start %s: %v", req.Argv[0], err)

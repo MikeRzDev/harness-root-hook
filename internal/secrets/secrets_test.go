@@ -309,6 +309,8 @@ type fixture struct {
 	noSession bool
 	project   Place // the project's git-ignored env file, when it has one
 	find      func(string) string
+	// beforeStart runs between the check of the program file and its start.
+	beforeStart func()
 }
 
 // entry is the name under which the fixture's session keeps a secret.
@@ -350,7 +352,8 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) runner() *Runner {
 	return &Runner{
-		Harness: "claude-code", Title: "Secret request (Claude Code)", ConfigPath: "/cfg.json",
+		beforeStart: f.beforeStart,
+		Harness:     "claude-code", Title: "Secret request (Claude Code)", ConfigPath: "/cfg.json",
 		Policy:   func() (Policy, error) { return LoadPolicy(f.cfg) },
 		AddRules: func(rules map[string]Rule) error { return AddRules(f.cfg, rules) },
 		Ask: func(_ context.Context, req prompt.Request) ([]byte, error) {
@@ -913,20 +916,115 @@ func TestForbiddenProgramsUnderAnotherName(t *testing.T) {
 	}
 }
 
-// A program is pinned when the user's own account could change it.
-func TestReplaceable(t *testing.T) {
-	mine := filepath.Join(t.TempDir(), "tool")
-	os.WriteFile(mine, []byte("x"), 0o755)
-	if !replaceable(mine) || !replaceable(filepath.Join(t.TempDir(), "missing")) {
-		t.Error("a file of the user, or one that does not exist, counts as fixed")
+// A rule's entry can be a link in a folder of the user. Pointing it at a
+// program only root can change (an interpreter, say) is a changed program
+// like any other: every local program is pinned, whoever owns it.
+func TestALinkPointedAtASystemProgramIsAChangedProgram(t *testing.T) {
+	f := newFixture(t)
+	link := filepath.Join(f.dir, "mytool")
+	os.Symlink(f.tool, link)
+	f.policy = `{"secrets":{"tok":{"commands":["` + link + `"],"vars":["TOKEN"]}}}`
+	req := Request{Uses: []Use{{Var: "TOKEN", Name: "tok"}}, Argv: []string{link}}
+	f.answer = []int{1}
+	if code := f.run(req); code != 7 {
+		t.Fatalf("first: %d %s", code, f.stderr.String())
 	}
-	if os.Getuid() != 0 && replaceable("/bin/ls") {
-		t.Error("/bin/ls counts as something the user can change")
+	os.Remove(link)
+	os.Symlink("/bin/ls", link)
+	f.answer = nil
+	if code := f.run(req); code != runner.ExitCancelled || len(f.chosen) != 1 || !strings.Contains(f.chosen[0].Title, "Program changed") ||
+		!strings.Contains(f.chosen[0].Text, mustReal(t, "/bin/ls")) || f.stdout.Len() != 0 {
+		t.Fatalf("link to /bin/ls: %d %+v %q", code, f.chosen, f.stdout.String())
 	}
-	a, _ := fileSum(mine)
-	os.WriteFile(mine, []byte("y"), 0o755)
-	if b, err := fileSum(mine); err != nil || a == b || len(a) != 64 {
-		t.Errorf("sums %q %q %v", a, b, err)
+}
+
+// What starts has to be what was checked: a file that is edited or replaced
+// between the check and the start is refused.
+func TestAProgramChangedAfterTheCheckIsNotStarted(t *testing.T) {
+	for name, tamper := range map[string]func(tool string){
+		"edited in place": func(tool string) {
+			file, _ := os.OpenFile(tool, os.O_WRONLY|os.O_APPEND, 0)
+			file.WriteString("# changed\n")
+			file.Close()
+		},
+		"replaced": func(tool string) {
+			os.WriteFile(tool+".new", []byte(toolScript), 0o755)
+			os.Rename(tool+".new", tool)
+		},
+	} {
+		f := newFixture(t)
+		f.policy = `{"secrets":{"tok":{"commands":["` + f.tool + `"],"vars":["TOKEN"]}}}`
+		f.answer = []int{1}
+		f.beforeStart = func() { tamper(f.tool) }
+		if code := f.run(tokReq(f)); code != ExitNotAllowed || !strings.Contains(f.stderr.String(), "changed after psudo checked it") ||
+			strings.Contains(f.stdout.String(), "raw:") {
+			t.Errorf("%s: %d %q %q", name, code, f.stdout.String(), f.stderr.String())
+		}
+	}
+	// A value from the env file needs no check, so nothing is compared.
+	f := newFixture(t)
+	env := filepath.Join(f.dir, ".env")
+	os.WriteFile(env, []byte("ONLY_ENV=value\n"), 0o600)
+	f.project = ProjectPlace(envfile.Project{Read: []string{env}, Save: env, Root: f.dir}, &stubGit{})
+	if code := f.run(Request{Uses: []Use{{Var: "TOKEN", Name: "only-env"}}, Argv: []string{f.tool}}); code != 7 {
+		t.Fatalf("env only: %d %s", code, f.stderr.String())
+	}
+}
+
+func TestFileIdentityAndSum(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "tool")
+	os.WriteFile(file, []byte("x"), 0o755)
+	id, err := fileIdentity(file)
+	sum, _ := fileSum(file)
+	if again, _ := fileIdentity(file); err != nil || id == "" || again != id || len(sum) != 64 {
+		t.Fatalf("%q %q %v", id, again, err)
+	}
+	os.WriteFile(file+".new", []byte("x"), 0o755)
+	os.Rename(file+".new", file) // the same bytes, but another file
+	if replaced, _ := fileIdentity(file); replaced == id {
+		t.Error("a replaced file has the identity of the old one")
+	}
+	os.WriteFile(file, []byte("y"), 0o755)
+	if changed, _ := fileSum(file); changed == sum {
+		t.Error("the sum did not change with the contents")
+	}
+	if _, err := fileIdentity(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("a missing file has an identity")
+	}
+}
+
+// An interpreter is recognised by the file that runs, not only by the name
+// it is called by: a link with an innocent name, or a hard link.
+func TestAnInterpreterUnderAnotherNameStillAsks(t *testing.T) {
+	f := newFixture(t)
+	f.policy = `{}`
+	python := filepath.Join(f.dir, "python3.12")
+	os.WriteFile(python, []byte(toolScript), 0o755)
+	link := filepath.Join(f.dir, "deploy-tool")
+	os.Symlink(python, link)
+	f.typed = []string{"value"}
+	if code := f.run(Request{Uses: []Use{{Var: "TOKEN", Name: "fresh"}}, Argv: []string{link, "-c", "print(1)"}}); code != 7 {
+		t.Fatalf("link: %d %s", code, f.stderr.String())
+	}
+	if p, err := ParsePolicy([]byte(f.policy)); err != nil || !p["fresh"].Confirm || !strings.Contains(f.asked[0].Text, "asks before each use") {
+		t.Fatalf("a link to an interpreter got a rule that does not ask: %+v %v", p["fresh"], err)
+	}
+	// The same file as an interpreter that find knows, under another name.
+	dir := t.TempDir()
+	perl, alias, plain := filepath.Join(dir, "interp"), filepath.Join(dir, "report-tool"), filepath.Join(dir, "plain-tool")
+	os.WriteFile(perl, []byte("x"), 0o755)
+	os.WriteFile(plain, []byte("x"), 0o755)
+	if err := os.Link(perl, alias); err != nil {
+		t.Skip("hard links are not available here:", err)
+	}
+	find := func(name string) string {
+		if name == "perl" {
+			return perl
+		}
+		return ""
+	}
+	if !interpreterFile(alias, find) || interpreterFile(plain, find) {
+		t.Error("a hard link to an interpreter is not recognised, or an ordinary file is")
 	}
 }
 

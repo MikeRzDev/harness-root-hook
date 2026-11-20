@@ -259,10 +259,9 @@ psudo --secret STRIPE_API_KEY=stripe-api-key -- ./charge-report
 - **Later uses: no dialog.** psudo has the value and the rule covers the
   program, so the command just runs. A program the rule does not list is
   refused. psudo only opens a dialog when it needs something from you.
-- **The program must stay the one you allowed.** For a program your own account
-  can change (a project script, anything Homebrew installed), psudo remembers
-  the file's SHA-256 and asks again if the file is a different one later: after
-  an update, or after someone edited or replaced it.
+- **The program must stay the one you allowed.** psudo remembers the SHA-256
+  of the program file and asks again if the file is a different one later:
+  after an update, or after someone edited or replaced it.
 - **Interpreters ask every time.** `python3`, `node`, `perl` and the like run
   whatever code they are given, so a rule psudo adds for one keeps the
   Deny / Allow once dialog, which shows the whole command. Set
